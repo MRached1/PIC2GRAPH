@@ -62,6 +62,16 @@ class PIC2GRAPHGUI:
         self.display_scale = 1.0
         self.max_display_size = 800
 
+        # Zoom state
+        self.zoom_level = 1.0
+        self.min_zoom = 0.5
+        self.max_zoom = 5.0
+        self.pan_start_x = 0
+        self.pan_start_y = 0
+        self.canvas_offset_x = 0
+        self.canvas_offset_y = 0
+        self.is_panning = False
+
         # Contour editing state
         self.edit_mode = False
         self.current_edit_side = "left"
@@ -100,6 +110,12 @@ class PIC2GRAPHGUI:
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<Button-3>", self._on_canvas_right_click)  # Right-click to add point
+
+        # Bind mouse events for zoom and pan
+        self.canvas.bind("<MouseWheel>", self._on_canvas_mousewheel)  # Windows zoom
+        self.canvas.bind("<Button-2>", self._on_pan_start)  # Middle-click pan start
+        self.canvas.bind("<B2-Motion>", self._on_pan_drag)  # Middle-click pan drag
+        self.canvas.bind("<ButtonRelease-2>", self._on_pan_end)  # Middle-click pan end
 
         # Right panel - Controls and measurements (with scrollbar)
         right_container = ttk.Frame(main_frame)
@@ -255,9 +271,38 @@ class PIC2GRAPHGUI:
 
         rotation_frame.columnconfigure(1, weight=1)
 
+        # Zoom controls
+        zoom_frame = ttk.LabelFrame(right_panel, text="Zoom Controls", padding="5")
+        zoom_frame.grid(row=5, column=0, sticky="ew", pady=(0, 5))
+
+        zoom_btn_frame = ttk.Frame(zoom_frame)
+        zoom_btn_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+
+        ttk.Button(zoom_btn_frame, text="Zoom In (+)", width=10,
+                   command=lambda: self._zoom(1.25)).pack(side="left", padx=2)
+        ttk.Button(zoom_btn_frame, text="Zoom Out (-)", width=10,
+                   command=lambda: self._zoom(0.8)).pack(side="left", padx=2)
+        ttk.Button(zoom_btn_frame, text="Fit", width=5,
+                   command=self._reset_zoom).pack(side="left", padx=2)
+
+        self.zoom_label = ttk.Label(zoom_frame, text="100%", width=8)
+        self.zoom_label.grid(row=0, column=2, sticky="e", padx=(5, 0))
+
+        ttk.Label(zoom_frame, text="Zoom:", font=("", 8)).grid(row=1, column=0, sticky="w", pady=(5, 0))
+        self.zoom_slider = ttk.Scale(zoom_frame, from_=50, to=500,
+                                      orient="horizontal",
+                                      command=self._on_zoom_slider_change)
+        self.zoom_slider.set(100)
+        self.zoom_slider.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(5, 0))
+
+        ttk.Label(zoom_frame, text="Mouse wheel to zoom, middle-click to pan", font=("", 7)).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
+
+        zoom_frame.columnconfigure(1, weight=1)
+
         # Detection parameters
         params_frame = ttk.LabelFrame(right_panel, text="Detection Parameters", padding="5")
-        params_frame.grid(row=5, column=0, sticky="ew", pady=(0, 5))
+        params_frame.grid(row=6, column=0, sticky="ew", pady=(0, 5))
 
         ttk.Label(params_frame, text="Reference Size (mm):").grid(row=0, column=0, sticky="w")
         self.grid_size_var = tk.StringVar(value="15")
@@ -268,7 +313,7 @@ class PIC2GRAPHGUI:
 
         # Status bar
         status_frame = ttk.Frame(right_panel)
-        status_frame.grid(row=6, column=0, sticky="ew")
+        status_frame.grid(row=7, column=0, sticky="ew")
 
         self.status_var = tk.StringVar(value="Ready. Load an image to begin.")
         status_label = ttk.Label(status_frame, textvariable=self.status_var,
@@ -304,6 +349,12 @@ class PIC2GRAPHGUI:
             self.state.processed_image = image.copy()
             self.state.image_path = filepath
 
+            # Reset zoom and pan
+            self.zoom_level = 1.0
+            self.canvas_offset_x = 0
+            self.canvas_offset_y = 0
+            self._update_zoom_display()
+
             self._display_image(image)
             self.status_var.set(f"Loaded: {os.path.basename(filepath)}")
 
@@ -325,6 +376,155 @@ class PIC2GRAPHGUI:
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load image: {str(e)}")
+
+    def _zoom(self, factor: float):
+        """Zoom the canvas by a factor."""
+        if self.state.display_image is None and self.state.processed_image is None:
+            return
+
+        new_zoom = self.zoom_level * factor
+        new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
+
+        if new_zoom != self.zoom_level:
+            self.zoom_level = new_zoom
+            self._update_zoom_display()
+            self._redraw_zoomed_image()
+
+    def _reset_zoom(self):
+        """Reset zoom to fit the image in the canvas."""
+        self.zoom_level = 1.0
+        self.canvas_offset_x = 0
+        self.canvas_offset_y = 0
+        self._update_zoom_display()
+        self._redraw_zoomed_image()
+
+    def _on_zoom_slider_change(self, value):
+        """Handle zoom slider change."""
+        zoom_percent = float(value)
+        self.zoom_level = zoom_percent / 100.0
+        # Only update label, not slider (to avoid recursion)
+        self.zoom_label.config(text=f"{int(zoom_percent)}%")
+        self._redraw_zoomed_image()
+
+    def _update_zoom_display(self):
+        """Update zoom label and slider."""
+        zoom_percent = int(self.zoom_level * 100)
+        self.zoom_label.config(text=f"{zoom_percent}%")
+        # Temporarily unbind to avoid recursion when setting slider
+        self.zoom_slider.config(command="")
+        self.zoom_slider.set(zoom_percent)
+        self.zoom_slider.config(command=self._on_zoom_slider_change)
+
+    def _on_canvas_mousewheel(self, event):
+        """Handle mouse wheel for zooming."""
+        # Only zoom on canvas, not when scrolling controls
+        if self.state.display_image is None and self.state.processed_image is None:
+            return
+
+        # Get mouse position on canvas for zoom centering
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+
+        # Zoom factor based on scroll direction
+        if event.delta > 0:
+            factor = 1.15
+        else:
+            factor = 0.87
+
+        old_zoom = self.zoom_level
+        new_zoom = self.zoom_level * factor
+        new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
+
+        if new_zoom != old_zoom:
+            # Adjust offset to zoom toward mouse position
+            zoom_ratio = new_zoom / old_zoom
+            self.canvas_offset_x = canvas_x - (canvas_x - self.canvas_offset_x) * zoom_ratio
+            self.canvas_offset_y = canvas_y - (canvas_y - self.canvas_offset_y) * zoom_ratio
+
+            self.zoom_level = new_zoom
+            self._update_zoom_display()
+            self._redraw_zoomed_image()
+
+        return "break"  # Prevent default scroll behavior
+
+    def _on_pan_start(self, event):
+        """Start panning with middle mouse button."""
+        self.is_panning = True
+        self.pan_start_x = event.x
+        self.pan_start_y = event.y
+        self.canvas.config(cursor="fleur")
+
+    def _on_pan_drag(self, event):
+        """Handle pan dragging."""
+        if not self.is_panning:
+            return
+
+        dx = event.x - self.pan_start_x
+        dy = event.y - self.pan_start_y
+
+        self.canvas_offset_x += dx
+        self.canvas_offset_y += dy
+
+        self.pan_start_x = event.x
+        self.pan_start_y = event.y
+
+        self._redraw_zoomed_image()
+
+    def _on_pan_end(self, event):
+        """End panning."""
+        self.is_panning = False
+        self.canvas.config(cursor="")
+
+    def _redraw_zoomed_image(self):
+        """Redraw the image with current zoom and pan settings."""
+        # Get the image to display
+        if self.state.display_image is not None:
+            image = self.state.display_image.copy()
+        elif self.state.processed_image is not None:
+            image = self.state.processed_image.copy()
+        else:
+            return
+
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        h, w = rgb_image.shape[:2]
+        canvas_w = self.canvas.winfo_width() or 900
+        canvas_h = self.canvas.winfo_height() or 700
+
+        # Calculate base scale to fit image
+        base_scale = min(canvas_w / w, canvas_h / h, 1.0)
+        self.display_scale = base_scale
+
+        # Apply base scale first
+        if base_scale < 1.0:
+            new_w = int(w * base_scale)
+            new_h = int(h * base_scale)
+            rgb_image = cv2.resize(rgb_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            h, w = new_h, new_w
+
+        # Apply zoom
+        if self.zoom_level != 1.0:
+            new_w = int(w * self.zoom_level)
+            new_h = int(h * self.zoom_level)
+            if self.zoom_level > 1.0:
+                rgb_image = cv2.resize(rgb_image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            else:
+                rgb_image = cv2.resize(rgb_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        pil_image = Image.fromarray(rgb_image)
+        self.photo_image = ImageTk.PhotoImage(pil_image)
+
+        self.canvas.delete("all")
+
+        # Calculate position with offset
+        x_pos = int(self.canvas_offset_x)
+        y_pos = int(self.canvas_offset_y)
+
+        self.canvas.create_image(x_pos, y_pos, anchor="nw", image=self.photo_image, tags="image")
+
+        # Redraw control points if in edit mode
+        if self.edit_mode:
+            self._draw_control_points()
 
     def _on_rotation_change(self, value):
         """Handle rotation slider change."""
@@ -521,44 +721,63 @@ class PIC2GRAPHGUI:
             traceback.print_exc()
 
     def _init_control_points(self):
-        """Initialize control points from detected contours."""
+        """Initialize control points from detected contours.
+
+        Control points are stored in original image coordinates (not display coordinates)
+        to allow proper handling of zoom and pan.
+        """
         self.control_points_left = []
         self.control_points_right = []
 
         if self.state.left_contour is not None:
             points = self.state.left_contour.reshape(-1, 2)
-            # Sample ~20 control points
+            # Sample ~20 control points - store in original image coordinates
             step = max(1, len(points) // 20)
-            self.control_points_left = [[int(p[0] * self.display_scale),
-                                         int(p[1] * self.display_scale)] for p in points[::step]]
+            self.control_points_left = [[int(p[0]), int(p[1])] for p in points[::step]]
 
         if self.state.right_contour is not None:
             points = self.state.right_contour.reshape(-1, 2)
             step = max(1, len(points) // 20)
-            self.control_points_right = [[int(p[0] * self.display_scale),
-                                          int(p[1] * self.display_scale)] for p in points[::step]]
+            self.control_points_right = [[int(p[0]), int(p[1])] for p in points[::step]]
 
     def _display_image(self, image: np.ndarray):
-        """Display an image on the canvas."""
+        """Display an image on the canvas with zoom support."""
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         h, w = rgb_image.shape[:2]
         canvas_w = self.canvas.winfo_width() or 900
         canvas_h = self.canvas.winfo_height() or 700
 
-        scale = min(canvas_w / w, canvas_h / h, 1.0)
-        self.display_scale = scale
+        # Calculate base scale to fit image
+        base_scale = min(canvas_w / w, canvas_h / h, 1.0)
+        self.display_scale = base_scale
 
-        if scale < 1.0:
-            new_w = int(w * scale)
-            new_h = int(h * scale)
+        # Apply base scale first
+        if base_scale < 1.0:
+            new_w = int(w * base_scale)
+            new_h = int(h * base_scale)
             rgb_image = cv2.resize(rgb_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            h, w = new_h, new_w
+
+        # Apply zoom
+        if self.zoom_level != 1.0:
+            new_w = int(w * self.zoom_level)
+            new_h = int(h * self.zoom_level)
+            if self.zoom_level > 1.0:
+                rgb_image = cv2.resize(rgb_image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            else:
+                rgb_image = cv2.resize(rgb_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         pil_image = Image.fromarray(rgb_image)
         self.photo_image = ImageTk.PhotoImage(pil_image)
 
         self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo_image, tags="image")
+
+        # Calculate position with offset
+        x_pos = int(self.canvas_offset_x)
+        y_pos = int(self.canvas_offset_y)
+
+        self.canvas.create_image(x_pos, y_pos, anchor="nw", image=self.photo_image, tags="image")
 
     def _update_display(self):
         """Update the display with contours overlaid."""
@@ -573,16 +792,17 @@ class PIC2GRAPHGUI:
         color_bridge = (0, 255, 0)   # Green for Bridge
         color_ref = (255, 255, 0)    # Cyan for Reference
 
-        # Draw contours
-        if self.state.left_contour is not None:
-            cv2.drawContours(display, [self.state.left_contour], -1, (0, 0, 255), 2)
-            x, y, w, h = cv2.boundingRect(self.state.left_contour)
-            cv2.rectangle(display, (x, y), (x+w, y+h), (0, 0, 255), 1)
+        # Draw contours (only when NOT in edit mode - in edit mode, control points show the contour)
+        if not self.edit_mode:
+            if self.state.left_contour is not None:
+                cv2.drawContours(display, [self.state.left_contour], -1, (0, 0, 255), 2)
+                x, y, w, h = cv2.boundingRect(self.state.left_contour)
+                cv2.rectangle(display, (x, y), (x+w, y+h), (0, 0, 255), 1)
 
-        if self.state.right_contour is not None:
-            cv2.drawContours(display, [self.state.right_contour], -1, (255, 0, 0), 2)
-            x, y, w, h = cv2.boundingRect(self.state.right_contour)
-            cv2.rectangle(display, (x, y), (x+w, y+h), (255, 0, 0), 1)
+            if self.state.right_contour is not None:
+                cv2.drawContours(display, [self.state.right_contour], -1, (255, 0, 0), 2)
+                x, y, w, h = cv2.boundingRect(self.state.right_contour)
+                cv2.rectangle(display, (x, y), (x+w, y+h), (255, 0, 0), 1)
 
         # Use right contour for labeling (or left if right not available)
         label_contour = self.state.right_contour if self.state.right_contour is not None else self.state.left_contour
@@ -796,6 +1016,21 @@ class PIC2GRAPHGUI:
             cv2.putText(display, ref_label, (label_x, label_y),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
+    def _image_to_canvas_coords(self, img_x: float, img_y: float) -> Tuple[float, float]:
+        """Convert image coordinates to canvas coordinates (with zoom and pan)."""
+        # Apply display scale and zoom
+        total_scale = self.display_scale * self.zoom_level
+        canvas_x = img_x * total_scale + self.canvas_offset_x
+        canvas_y = img_y * total_scale + self.canvas_offset_y
+        return canvas_x, canvas_y
+
+    def _canvas_to_image_coords(self, canvas_x: float, canvas_y: float) -> Tuple[float, float]:
+        """Convert canvas coordinates to image coordinates (accounting for zoom and pan)."""
+        total_scale = self.display_scale * self.zoom_level
+        img_x = (canvas_x - self.canvas_offset_x) / total_scale
+        img_y = (canvas_y - self.canvas_offset_y) / total_scale
+        return img_x, img_y
+
     def _draw_control_points(self):
         """Draw control points on the canvas."""
         self.canvas.delete("control_point")
@@ -807,15 +1042,19 @@ class PIC2GRAPHGUI:
             for i in range(len(self.control_points_left)):
                 p1 = self.control_points_left[i]
                 p2 = self.control_points_left[(i + 1) % len(self.control_points_left)]
-                self.canvas.create_line(p1[0], p1[1], p2[0], p2[1],
-                                        fill="red", width=1, tags="control_line")
+                # Convert to canvas coordinates
+                c1 = self._image_to_canvas_coords(p1[0], p1[1])
+                c2 = self._image_to_canvas_coords(p2[0], p2[1])
+                self.canvas.create_line(c1[0], c1[1], c2[0], c2[1],
+                                        fill="red", width=2, tags="control_line")
 
             # Draw points
             for i, (x, y) in enumerate(self.control_points_left):
+                cx, cy = self._image_to_canvas_coords(x, y)
                 color = "yellow" if self.current_edit_side == "left" else "darkred"
                 self.canvas.create_oval(
-                    x - self.point_radius, y - self.point_radius,
-                    x + self.point_radius, y + self.point_radius,
+                    cx - self.point_radius, cy - self.point_radius,
+                    cx + self.point_radius, cy + self.point_radius,
                     fill=color, outline="white", width=2,
                     tags=("control_point", f"left_{i}")
                 )
@@ -826,15 +1065,19 @@ class PIC2GRAPHGUI:
             for i in range(len(self.control_points_right)):
                 p1 = self.control_points_right[i]
                 p2 = self.control_points_right[(i + 1) % len(self.control_points_right)]
-                self.canvas.create_line(p1[0], p1[1], p2[0], p2[1],
-                                        fill="blue", width=1, tags="control_line")
+                # Convert to canvas coordinates
+                c1 = self._image_to_canvas_coords(p1[0], p1[1])
+                c2 = self._image_to_canvas_coords(p2[0], p2[1])
+                self.canvas.create_line(c1[0], c1[1], c2[0], c2[1],
+                                        fill="blue", width=2, tags="control_line")
 
             # Draw points
             for i, (x, y) in enumerate(self.control_points_right):
+                cx, cy = self._image_to_canvas_coords(x, y)
                 color = "cyan" if self.current_edit_side == "right" else "darkblue"
                 self.canvas.create_oval(
-                    x - self.point_radius, y - self.point_radius,
-                    x + self.point_radius, y + self.point_radius,
+                    cx - self.point_radius, cy - self.point_radius,
+                    cx + self.point_radius, cy + self.point_radius,
                     fill=color, outline="white", width=2,
                     tags=("control_point", f"right_{i}")
                 )
@@ -849,14 +1092,16 @@ class PIC2GRAPHGUI:
             self._delete_nearest_point(event.x, event.y)
             return
 
-        # Find nearest control point
+        # Find nearest control point (compare in canvas coordinates)
         points = self.control_points_left if self.current_edit_side == "left" else self.control_points_right
 
         min_dist = float('inf')
         nearest_idx = None
 
         for i, (x, y) in enumerate(points):
-            dist = ((event.x - x) ** 2 + (event.y - y) ** 2) ** 0.5
+            # Convert point to canvas coordinates for comparison
+            cx, cy = self._image_to_canvas_coords(x, y)
+            dist = ((event.x - cx) ** 2 + (event.y - cy) ** 2) ** 0.5
             if dist < min_dist and dist < 20:
                 min_dist = dist
                 nearest_idx = i
@@ -871,7 +1116,9 @@ class PIC2GRAPHGUI:
         points = self.control_points_left if self.current_edit_side == "left" else self.control_points_right
 
         if 0 <= self.dragging_point_index < len(points):
-            points[self.dragging_point_index] = [event.x, event.y]
+            # Convert canvas coords back to image coords
+            img_x, img_y = self._canvas_to_image_coords(event.x, event.y)
+            points[self.dragging_point_index] = [int(img_x), int(img_y)]
             self._draw_control_points()
 
     def _on_canvas_release(self, event):
@@ -885,10 +1132,13 @@ class PIC2GRAPHGUI:
 
         points = self.control_points_left if self.current_edit_side == "left" else self.control_points_right
 
+        # Convert click to image coordinates
+        img_x, img_y = self._canvas_to_image_coords(event.x, event.y)
+
         if len(points) < 2:
-            points.append([event.x, event.y])
+            points.append([int(img_x), int(img_y)])
         else:
-            # Find the edge to insert the new point
+            # Find the edge to insert the new point (compare in canvas coordinates)
             min_dist = float('inf')
             insert_idx = 0
 
@@ -896,13 +1146,17 @@ class PIC2GRAPHGUI:
                 p1 = points[i]
                 p2 = points[(i + 1) % len(points)]
 
-                # Distance from click to line segment
-                dist = self._point_to_segment_dist(event.x, event.y, p1[0], p1[1], p2[0], p2[1])
+                # Convert points to canvas coords for distance calculation
+                c1 = self._image_to_canvas_coords(p1[0], p1[1])
+                c2 = self._image_to_canvas_coords(p2[0], p2[1])
+
+                # Distance from click to line segment in canvas coords
+                dist = self._point_to_segment_dist(event.x, event.y, c1[0], c1[1], c2[0], c2[1])
                 if dist < min_dist:
                     min_dist = dist
                     insert_idx = i + 1
 
-            points.insert(insert_idx, [event.x, event.y])
+            points.insert(insert_idx, [int(img_x), int(img_y)])
 
         self._draw_control_points()
         self.status_var.set(f"Added point. Total: {len(points)} points")
@@ -933,7 +1187,9 @@ class PIC2GRAPHGUI:
         nearest_idx = None
 
         for i, (px, py) in enumerate(points):
-            dist = ((x - px) ** 2 + (y - py) ** 2) ** 0.5
+            # Convert to canvas coordinates for comparison
+            cx, cy = self._image_to_canvas_coords(px, py)
+            dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
             if dist < min_dist:
                 min_dist = dist
                 nearest_idx = i
@@ -949,22 +1205,25 @@ class PIC2GRAPHGUI:
 
         if self.edit_mode:
             if not self.control_points_left and not self.control_points_right:
-                # Create default control points if none exist
+                # Create default control points if none exist (in image coordinates)
                 if self.state.processed_image is not None:
                     h, w = self.state.processed_image.shape[:2]
-                    # Create a default ellipse shape
-                    cx, cy = int(w * 0.3 * self.display_scale), int(h * 0.5 * self.display_scale)
-                    rx, ry = int(w * 0.1 * self.display_scale), int(h * 0.15 * self.display_scale)
+                    # Create a default ellipse shape in image coordinates
+                    cx, cy = int(w * 0.3), int(h * 0.5)
+                    rx, ry = int(w * 0.1), int(h * 0.15)
                     self.control_points_left = self._create_ellipse_points(cx, cy, rx, ry)
 
-                    cx2 = int(w * 0.7 * self.display_scale)
+                    cx2 = int(w * 0.7)
                     self.control_points_right = self._create_ellipse_points(cx2, cy, rx, ry)
 
-            self._draw_control_points()
+            # Refresh display to hide the original contours
+            self._update_display()
             self.status_var.set("Edit mode ON. Drag points to adjust, right-click to add, Ctrl+click to delete.")
         else:
             self.canvas.delete("control_point")
             self.canvas.delete("control_line")
+            # Refresh display to show the original contours again
+            self._update_display()
             self.status_var.set("Edit mode OFF.")
 
     def _create_ellipse_points(self, cx, cy, rx, ry, num_points=16):
@@ -993,9 +1252,9 @@ class PIC2GRAPHGUI:
         try:
             from scipy.interpolate import splprep, splev
 
-            # Convert left control points to contour
+            # Convert left control points to contour (points are already in image coordinates)
             if self.control_points_left and len(self.control_points_left) >= 3:
-                points = np.array(self.control_points_left) / self.display_scale
+                points = np.array(self.control_points_left, dtype=np.float64)
                 points = np.vstack([points, points[0]])  # Close the contour
 
                 tck, u = splprep([points[:, 0], points[:, 1]], s=0, per=True)
@@ -1003,9 +1262,9 @@ class PIC2GRAPHGUI:
                 x_new, y_new = splev(u_new, tck)
                 self.state.left_contour = np.column_stack([x_new, y_new]).reshape(-1, 1, 2).astype(np.int32)
 
-            # Convert right control points to contour
+            # Convert right control points to contour (points are already in image coordinates)
             if self.control_points_right and len(self.control_points_right) >= 3:
-                points = np.array(self.control_points_right) / self.display_scale
+                points = np.array(self.control_points_right, dtype=np.float64)
                 points = np.vstack([points, points[0]])
 
                 tck, u = splprep([points[:, 0], points[:, 1]], s=0, per=True)
