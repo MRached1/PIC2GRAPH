@@ -18,12 +18,14 @@ from contour_detector import ContourDetector
 from measurements import MeasurementCalculator, FrameMeasurements
 from polar_converter import PolarConverter
 from dat_generator import DATGenerator, DATFileData
+from image_aligner import ImageAligner
 
 
 @dataclass
 class AppState:
     """Application state container."""
     original_image: Optional[np.ndarray] = None
+    aligned_image: Optional[np.ndarray] = None
     processed_image: Optional[np.ndarray] = None
     display_image: Optional[np.ndarray] = None
     left_contour: Optional[np.ndarray] = None
@@ -32,6 +34,8 @@ class AppState:
     measurements: Optional[FrameMeasurements] = None
     grid_confidence: float = 0.0
     contour_confidence: float = 0.0
+    rotation_applied: float = 0.0
+    alignment_confidence: float = 0.0
     image_path: str = ""
 
 
@@ -49,6 +53,7 @@ class PIC2GRAPHGUI:
         # Processing modules
         self.grid_detector = GridDetector(grid_size_mm=8.0)
         self.perspective_corrector = PerspectiveCorrector()
+        self.image_aligner = ImageAligner()
         self.contour_detector = ContourDetector()
         self.polar_converter = PolarConverter(num_points=1000)
         self.dat_generator = DATGenerator()
@@ -240,9 +245,12 @@ class PIC2GRAPHGUI:
             self.status_var.set(f"Loaded: {os.path.basename(filepath)}")
 
             # Reset state
+            self.state.aligned_image = None
             self.state.left_contour = None
             self.state.right_contour = None
             self.state.measurements = None
+            self.state.rotation_applied = 0.0
+            self.state.alignment_confidence = 0.0
             self.control_points_left = []
             self.control_points_right = []
             self._update_measurements_display()
@@ -270,16 +278,39 @@ class PIC2GRAPHGUI:
             except ValueError:
                 grid_size = 8.0
 
-            # Grid detection
+            # Grid detection (first pass for alignment reference)
             self.status_var.set("Detecting grid...")
             self.root.update()
             pixels_per_mm, grid_conf = self.grid_detector.detect_grid(image)
             self.state.pixels_per_mm = pixels_per_mm
             self.state.grid_confidence = grid_conf
 
+            # Image alignment (rotation correction based on grid and glasses)
+            self.status_var.set("Aligning image...")
+            self.root.update()
+            aligned_image, rotation_angle = self.image_aligner.align_image(
+                image,
+                grid_lines_h=self.grid_detector.grid_lines_horizontal,
+                grid_lines_v=self.grid_detector.grid_lines_vertical,
+                use_glasses_detection=True
+            )
+            self.state.rotation_applied = rotation_angle
+            self.state.alignment_confidence = self.image_aligner.confidence * 100
+            self.state.aligned_image = aligned_image
+
+            # If significant rotation applied, re-detect grid on aligned image
+            if abs(rotation_angle) > 1.0:
+                pixels_per_mm_new, grid_conf_new = self.grid_detector.detect_grid(aligned_image)
+                if grid_conf_new > grid_conf:
+                    pixels_per_mm = pixels_per_mm_new
+                    grid_conf = grid_conf_new
+                    self.state.pixels_per_mm = pixels_per_mm
+                    self.state.grid_confidence = grid_conf
+
+            image = aligned_image
             self.state.processed_image = image
 
-            # Contour detection
+            # Contour detection on aligned image
             self.status_var.set("Detecting lens contours...")
             self.root.update()
             left_contour, right_contour, contour_conf = self.contour_detector.detect_contours(image)
@@ -303,13 +334,14 @@ class PIC2GRAPHGUI:
             self._update_confidence_display()
             self._update_measurements_display()
 
+            rotation_info = f", Rot: {rotation_angle:.1f}deg" if abs(rotation_angle) > 0.5 else ""
             if contour_conf < 85:
                 self.status_var.set(
-                    f"Low confidence ({contour_conf:.1f}%). Enable editing to adjust contours manually."
+                    f"Low confidence ({contour_conf:.1f}%){rotation_info}. Enable editing to adjust contours."
                 )
             else:
                 self.status_var.set(
-                    f"Done. Grid: {grid_conf:.1f}%, Contour: {contour_conf:.1f}%"
+                    f"Done. Grid: {grid_conf:.1f}%, Contour: {contour_conf:.1f}%{rotation_info}"
                 )
 
         except Exception as e:

@@ -1,6 +1,8 @@
 """
 Glasses Contour Detection Module
 Detects the inner edge of eyeglass frames (lens opening)
+
+Strategy: Detect the dark frame material, then trace its inner edges
 """
 
 import cv2
@@ -24,19 +26,12 @@ class ContourDetector:
     def detect_contours(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
         """
         Detect both lens contours in the image.
-
-        Args:
-            image: Input image (BGR format)
-
-        Returns:
-            Tuple of (left_contour, right_contour, confidence)
         """
-        # Try multiple detection methods
         methods = [
-            ("edge_detection", self._detect_by_edges),
-            ("color_segmentation", self._detect_by_color),
-            ("adaptive_threshold", self._detect_by_adaptive_threshold),
-            ("lens_reflection", self._detect_by_reflection),
+            ("frame_edge_tracing", self._detect_by_frame_edges),
+            ("dark_region_inner_boundary", self._detect_dark_region_inner_boundary),
+            ("color_based_frame", self._detect_by_color_segmentation),
+            ("morphological_frame", self._detect_by_morphological),
         ]
 
         best_left = None
@@ -53,6 +48,7 @@ class ContourDetector:
                     best_confidence = conf
                     best_method = method_name
             except Exception as e:
+                print(f"Method {method_name} failed: {e}")
                 continue
 
         self.left_contour = best_left
@@ -60,7 +56,6 @@ class ContourDetector:
         self.confidence = best_confidence
         self.detection_method = best_method
 
-        # Calculate centers
         if self.left_contour is not None:
             self.left_center = self._calculate_center(self.left_contour)
         if self.right_contour is not None:
@@ -68,287 +63,467 @@ class ContourDetector:
 
         return self.left_contour, self.right_contour, self.confidence
 
-    def _detect_by_edges(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
-        """Detect contours using edge detection."""
+    def _detect_by_frame_edges(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
+        """
+        PRIMARY METHOD: Detect the dark frame, then find its inner boundary.
+        The lens opening is bounded by the inner edge of the frame material.
+        """
+        img_h, img_w = image.shape[:2]
+        img_area = img_h * img_w
+
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # Apply bilateral filter to reduce noise while preserving edges
-        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+        # Step 1: Detect the dark frame material using multiple methods
+        # The frame is significantly darker than the white grid paper
 
-        # Multi-scale edge detection
-        edges1 = cv2.Canny(filtered, 30, 100)
-        edges2 = cv2.Canny(filtered, 50, 150)
-        edges3 = cv2.Canny(filtered, 70, 200)
+        # Method A: Simple threshold for dark regions
+        # The frame is dark (low values), paper is white (high values)
+        _, dark_mask = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
 
-        # Combine edges
-        edges = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
-
-        # Morphological operations to close gaps and fill holes
-        kernel = np.ones((3, 3), np.uint8)
-        edges = cv2.dilate(edges, kernel, iterations=2)
-        edges = cv2.erode(edges, kernel, iterations=1)
-
-        # Fill enclosed regions to get solid contours
-        # This helps detect the lens opening as a solid shape
-        filled = edges.copy()
-        h, w = filled.shape
-        mask = np.zeros((h + 2, w + 2), np.uint8)
-        cv2.floodFill(filled, mask, (0, 0), 255)
-        filled_inv = cv2.bitwise_not(filled)
-        solid_regions = cv2.bitwise_or(edges, filled_inv)
-
-        # Find contours on the solid regions
-        contours, _ = cv2.findContours(solid_regions, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-
-        # Also try the original edge contours
-        edge_contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-
-        # Combine both sets
-        all_contours = list(contours) + list(edge_contours)
-
-        return self._select_lens_contours(all_contours, image.shape)
-
-    def _detect_by_color(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
-        """Detect contours using color-based segmentation."""
-        # Convert to different color spaces
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-
-        # Detect dark regions (frames are typically darker than background)
-        _, v_channel = cv2.threshold(hsv[:, :, 2], 0, 255,
-                                     cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-        # Also use L channel from LAB
-        _, l_channel = cv2.threshold(lab[:, :, 0], 0, 255,
-                                     cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-        # Combine masks
-        combined = cv2.bitwise_or(v_channel, l_channel)
-
-        # Clean up
-        kernel = np.ones((5, 5), np.uint8)
-        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
-        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
-
-        # Find contours
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-
-        return self._select_lens_contours(contours, image.shape)
-
-    def _detect_by_adaptive_threshold(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
-        """Detect contours using adaptive thresholding."""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-        # Apply CLAHE for better contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-
-        # Adaptive threshold
-        binary = cv2.adaptiveThreshold(
-            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 11, 2
+        # Method B: Adaptive threshold
+        adaptive_mask = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 51, 10
         )
 
-        # Morphological operations
-        kernel = np.ones((3, 3), np.uint8)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # Method C: Otsu
+        _, otsu_mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Find contours
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        # Combine - use the intersection (all agree it's dark)
+        frame_mask = cv2.bitwise_and(dark_mask, otsu_mask)
 
-        return self._select_lens_contours(contours, image.shape)
+        # Step 2: Clean up the frame mask
+        kernel_small = np.ones((3, 3), np.uint8)
+        kernel_medium = np.ones((5, 5), np.uint8)
 
-    def _detect_by_reflection(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
-        """Detect lens edges by their reflections (for rimless frames)."""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Remove noise (small specks)
+        frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_OPEN, kernel_small, iterations=2)
 
-        # Look for subtle brightness changes at lens edges
-        # Apply Laplacian for edge detection
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-        laplacian = np.uint8(np.absolute(laplacian))
+        # Fill small gaps in the frame
+        frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_CLOSE, kernel_medium, iterations=3)
 
-        # Threshold
-        _, binary = cv2.threshold(laplacian, 20, 255, cv2.THRESH_BINARY)
+        # Step 3: Find the frame contours
+        contours, hierarchy = cv2.findContours(frame_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
 
-        # Morphological operations
-        kernel = np.ones((5, 5), np.uint8)
-        binary = cv2.dilate(binary, kernel, iterations=2)
-        binary = cv2.erode(binary, kernel, iterations=1)
-
-        # Find contours
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-
-        return self._select_lens_contours(contours, image.shape, min_confidence=0.5)
-
-    def _select_lens_contours(self, contours: List, image_shape: Tuple,
-                              min_confidence: float = 0.7) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
-        """
-        Select the two contours most likely to be lens openings.
-        Handles both horizontal (standard) and vertical (rotated) glasses orientations.
-        """
-        if len(contours) < 1:
+        if hierarchy is None or len(contours) < 1:
             return None, None, 0.0
 
-        h, w = image_shape[:2]
-        image_area = h * w
-        image_center_x = w / 2
-        image_center_y = h / 2
+        hierarchy = hierarchy[0]
 
-        # Filter and score contours
-        candidates = []
+        # Step 4: Find inner contours (holes in the frame = lens openings)
+        # In RETR_CCOMP, hierarchy[i][3] is the parent, hierarchy[i][2] is first child
+        # Inner contours have a parent (hierarchy[i][3] != -1)
 
-        # Expected lens size range based on typical glasses dimensions
-        # Typical lens: 40-65mm wide, 25-50mm tall
-        # At various pixels/mm ratios, this could be 0.5% to 15% of typical image area
-        min_area = image_area * 0.005  # 0.5% minimum
-        max_area = image_area * 0.20   # 20% maximum
+        lens_candidates = []
 
-        for contour in contours:
-            area = cv2.contourArea(contour)
+        for i, (contour, hier) in enumerate(zip(contours, hierarchy)):
+            parent_idx = hier[3]
 
-            # Filter by area
-            if area < min_area or area > max_area:
+            # We want contours that are HOLES (have a parent)
+            if parent_idx == -1:
                 continue
 
-            # Check if contour has enough points for ellipse fitting
+            area = cv2.contourArea(contour)
+
+            # Lens openings should be substantial
+            if area < img_area * 0.01:  # At least 1% of image
+                continue
+            if area > img_area * 0.3:  # Not more than 30%
+                continue
+
+            # Check the shape
             if len(contour) < 5:
                 continue
 
-            # Get bounding box
             x, y, bw, bh = cv2.boundingRect(contour)
+            aspect = max(bw, bh) / (min(bw, bh) + 1e-6)
 
-            # Filter by bounding box aspect ratio (lens-like shapes)
-            bbox_aspect = max(bw, bh) / (min(bw, bh) + 1e-6)
-            if bbox_aspect > 2.5:  # Lenses are usually not that elongated
+            # Lens openings are roughly oval, not too elongated
+            if aspect > 2.0:
                 continue
 
-            # Filter out contours that span most of the image (likely paper edge)
-            # But allow contours that just touch edges (lens might extend to edge)
-            edge_margin = 3
-            spans_width = bw > w * 0.7
-            spans_height = bh > h * 0.7
-            if spans_width or spans_height:
+            # Check solidity
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / (hull_area + 1e-6)
+
+            # Lens openings should be fairly convex
+            if solidity < 0.75:
                 continue
 
-            try:
-                ellipse = cv2.fitEllipse(contour)
-                center, axes, angle = ellipse
-
-                # Aspect ratio check
-                ellipse_aspect = max(axes) / (min(axes) + 1e-6)
-                if ellipse_aspect > 2.5:
-                    continue
-
-                # Calculate how well contour matches ellipse shape
-                ellipse_contour = cv2.ellipse2Poly(
-                    (int(center[0]), int(center[1])),
-                    (int(axes[0]/2), int(axes[1]/2)),
-                    int(angle), 0, 360, 5
-                )
-                match_score = cv2.matchShapes(contour, ellipse_contour.reshape(-1, 1, 2),
-                                              cv2.CONTOURS_MATCH_I2, 0)
-
-                # Calculate convexity (lenses should be mostly convex)
-                hull = cv2.convexHull(contour)
-                hull_area = cv2.contourArea(hull)
-                solidity = area / (hull_area + 1e-6)
-
-                # Score based on multiple factors
-                shape_score = 1.0 / (1.0 + match_score * 5)  # Ellipse match
-                solidity_score = solidity  # Higher is better (more convex)
-
-                # Prefer contours that are reasonable size (not too small, not too large)
-                # Optimal is around 2-8% of image area
-                optimal_area = image_area * 0.04
-                size_score = 1.0 / (1.0 + abs(area - optimal_area) / optimal_area)
-
-                # Combined score
-                score = shape_score * 0.4 + solidity_score * 0.3 + size_score * 0.3
-
-                candidates.append({
-                    'contour': contour,
-                    'center': center,
-                    'area': area,
-                    'bbox': (x, y, bw, bh),
-                    'score': score,
-                    'solidity': solidity
-                })
-
-            except cv2.error:
+            # Check that parent is large enough (the frame)
+            parent_contour = contours[parent_idx]
+            parent_area = cv2.contourArea(parent_contour)
+            if parent_area < area * 1.5:  # Parent should be bigger
                 continue
 
+            # Score
+            optimal_area = img_area * 0.06
+            size_score = 1.0 / (1.0 + abs(area - optimal_area) / optimal_area)
+
+            lens_candidates.append({
+                'contour': contour,
+                'area': area,
+                'center': self._calculate_center(contour),
+                'bbox': (x, y, bw, bh),
+                'solidity': solidity,
+                'score': size_score * solidity * 1.2  # Boost this method
+            })
+
+        if len(lens_candidates) >= 1:
+            return self._select_best_lens_pair(lens_candidates, image.shape)
+
+        return None, None, 0.0
+
+    def _detect_dark_region_inner_boundary(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
+        """
+        Find dark regions (frame) and extract their inner boundaries.
+        Uses distance transform to find the "skeleton" of the frame and its inner edge.
+        """
+        img_h, img_w = image.shape[:2]
+        img_area = img_h * img_w
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Detect dark frame
+        _, frame_mask = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+
+        # Clean up
+        kernel = np.ones((5, 5), np.uint8)
+        frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        # Find contours of the frame
+        contours, _ = cv2.findContours(frame_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+        if len(contours) < 1:
+            return None, None, 0.0
+
+        # Find the largest dark region (should be the glasses frame)
+        frame_contours = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > img_area * 0.05:  # Significant size
+                frame_contours.append((contour, area))
+
+        if len(frame_contours) < 1:
+            return None, None, 0.0
+
+        # Sort by area
+        frame_contours.sort(key=lambda x: x[1], reverse=True)
+
+        # Take the largest frame region
+        main_frame = frame_contours[0][0]
+
+        # Create a filled mask of the frame
+        frame_filled = np.zeros((img_h, img_w), dtype=np.uint8)
+        cv2.drawContours(frame_filled, [main_frame], -1, 255, -1)
+
+        # Now find the "holes" - areas inside the frame bounding region but not part of frame
+        x, y, w, h = cv2.boundingRect(main_frame)
+
+        # The lens openings are white regions inside the frame's bounding box
+        # that are surrounded by dark frame material
+
+        # Create ROI
+        padding = 10
+        x1 = max(0, x - padding)
+        y1 = max(0, y - padding)
+        x2 = min(img_w, x + w + padding)
+        y2 = min(img_h, y + h + padding)
+
+        roi_gray = gray[y1:y2, x1:x2]
+        roi_frame = frame_mask[y1:y2, x1:x2]
+
+        # Find bright regions (not frame) within the ROI
+        _, bright_mask = cv2.threshold(roi_gray, 150, 255, cv2.THRESH_BINARY)
+
+        # These bright regions that are enclosed by frame are lens openings
+        # Use the frame as a boundary
+
+        # Invert frame mask to get non-frame regions
+        non_frame = cv2.bitwise_not(roi_frame)
+
+        # Find contours of non-frame regions
+        contours, _ = cv2.findContours(non_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+        lens_candidates = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+
+            if area < img_area * 0.01:
+                continue
+            if area > img_area * 0.25:
+                continue
+
+            if len(contour) < 5:
+                continue
+
+            bx, by, bw, bh = cv2.boundingRect(contour)
+            aspect = max(bw, bh) / (min(bw, bh) + 1e-6)
+            if aspect > 2.0:
+                continue
+
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / (hull_area + 1e-6)
+            if solidity < 0.7:
+                continue
+
+            # Check if this region is NOT touching the ROI boundary (i.e., it's enclosed)
+            if bx <= 2 or by <= 2 or bx + bw >= (x2-x1) - 2 or by + bh >= (y2-y1) - 2:
+                continue  # Touches edge, not a lens opening
+
+            # Offset contour back to original image coordinates
+            contour_offset = contour.copy()
+            contour_offset[:, :, 0] += x1
+            contour_offset[:, :, 1] += y1
+
+            center = self._calculate_center(contour_offset)
+
+            optimal_area = img_area * 0.05
+            size_score = 1.0 / (1.0 + abs(area - optimal_area) / optimal_area)
+
+            lens_candidates.append({
+                'contour': contour_offset,
+                'area': area,
+                'center': center,
+                'bbox': (bx + x1, by + y1, bw, bh),
+                'solidity': solidity,
+                'score': size_score * solidity
+            })
+
+        if len(lens_candidates) >= 1:
+            return self._select_best_lens_pair(lens_candidates, image.shape)
+
+        return None, None, 0.0
+
+    def _detect_by_color_segmentation(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
+        """
+        Use color-based segmentation to find the frame and then its inner edges.
+        """
+        img_h, img_w = image.shape[:2]
+        img_area = img_h * img_w
+
+        # Convert to different color spaces
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+
+        # The frame is dark - low V in HSV, low L in LAB
+        v_channel = hsv[:, :, 2]
+        l_channel = lab[:, :, 0]
+
+        # Threshold both
+        _, v_mask = cv2.threshold(v_channel, 100, 255, cv2.THRESH_BINARY_INV)
+        _, l_mask = cv2.threshold(l_channel, 100, 255, cv2.THRESH_BINARY_INV)
+
+        # Combine
+        frame_mask = cv2.bitwise_or(v_mask, l_mask)
+
+        # Clean up
+        kernel = np.ones((5, 5), np.uint8)
+        frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        # Find contours with hierarchy
+        contours, hierarchy = cv2.findContours(frame_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+
+        if hierarchy is None or len(contours) < 1:
+            return None, None, 0.0
+
+        hierarchy = hierarchy[0]
+
+        lens_candidates = []
+
+        for i, (contour, hier) in enumerate(zip(contours, hierarchy)):
+            parent_idx = hier[3]
+
+            if parent_idx == -1:
+                continue
+
+            area = cv2.contourArea(contour)
+            if area < img_area * 0.01 or area > img_area * 0.3:
+                continue
+
+            if len(contour) < 5:
+                continue
+
+            x, y, bw, bh = cv2.boundingRect(contour)
+            aspect = max(bw, bh) / (min(bw, bh) + 1e-6)
+            if aspect > 2.0:
+                continue
+
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / (hull_area + 1e-6)
+            if solidity < 0.7:
+                continue
+
+            optimal_area = img_area * 0.06
+            size_score = 1.0 / (1.0 + abs(area - optimal_area) / optimal_area)
+
+            lens_candidates.append({
+                'contour': contour,
+                'area': area,
+                'center': self._calculate_center(contour),
+                'bbox': (x, y, bw, bh),
+                'solidity': solidity,
+                'score': size_score * solidity * 0.9
+            })
+
+        if len(lens_candidates) >= 1:
+            return self._select_best_lens_pair(lens_candidates, image.shape)
+
+        return None, None, 0.0
+
+    def _detect_by_morphological(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
+        """
+        Use morphological operations to isolate the frame and find lens openings.
+        """
+        img_h, img_w = image.shape[:2]
+        img_area = img_h * img_w
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Strong blur to remove grid lines
+        blurred = cv2.GaussianBlur(gray, (15, 15), 0)
+
+        # Threshold
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Heavy morphological operations to get just the frame shape
+        kernel_large = np.ones((15, 15), np.uint8)
+        frame_mask = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_large, iterations=3)
+        frame_mask = cv2.morphologyEx(frame_mask, cv2.MORPH_OPEN, kernel_large, iterations=2)
+
+        # Find contours
+        contours, hierarchy = cv2.findContours(frame_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+
+        if hierarchy is None or len(contours) < 1:
+            return None, None, 0.0
+
+        hierarchy = hierarchy[0]
+
+        lens_candidates = []
+
+        for i, (contour, hier) in enumerate(zip(contours, hierarchy)):
+            parent_idx = hier[3]
+
+            if parent_idx == -1:
+                continue
+
+            area = cv2.contourArea(contour)
+            if area < img_area * 0.01 or area > img_area * 0.3:
+                continue
+
+            if len(contour) < 5:
+                continue
+
+            x, y, bw, bh = cv2.boundingRect(contour)
+            aspect = max(bw, bh) / (min(bw, bh) + 1e-6)
+            if aspect > 2.0:
+                continue
+
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / (hull_area + 1e-6)
+            if solidity < 0.7:
+                continue
+
+            optimal_area = img_area * 0.06
+            size_score = 1.0 / (1.0 + abs(area - optimal_area) / optimal_area)
+
+            lens_candidates.append({
+                'contour': contour,
+                'area': area,
+                'center': self._calculate_center(contour),
+                'bbox': (x, y, bw, bh),
+                'solidity': solidity,
+                'score': size_score * solidity * 0.85
+            })
+
+        if len(lens_candidates) >= 1:
+            return self._select_best_lens_pair(lens_candidates, image.shape)
+
+        return None, None, 0.0
+
+    def _select_best_lens_pair(self, candidates: List[dict], image_shape: Tuple) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
+        """Select the best pair of lens contours."""
         if len(candidates) < 1:
             return None, None, 0.0
 
-        # Sort by score
+        img_h, img_w = image_shape[:2]
+        image_center_x = img_w / 2
+        image_center_y = img_h / 2
+
         candidates.sort(key=lambda x: x['score'], reverse=True)
 
-        # Determine if glasses are oriented horizontally or vertically
-        # by checking the positions of top candidates
+        # Determine orientation
         if len(candidates) >= 2:
             c1, c2 = candidates[0], candidates[1]
             x_diff = abs(c1['center'][0] - c2['center'][0])
             y_diff = abs(c1['center'][1] - c2['center'][1])
             is_vertical = y_diff > x_diff
         else:
-            is_vertical = h > w  # Assume based on image orientation
+            is_vertical = img_h > img_w
 
-        # Select best two contours
         left_contour = None
         right_contour = None
         confidence = 0.0
 
         if len(candidates) >= 2:
-            # Find two contours that are separated appropriately
-            for i, c1 in enumerate(candidates[:8]):  # Check top 8
-                for c2 in candidates[i+1:10]:
+            best_pair_score = 0
+
+            for i, c1 in enumerate(candidates[:10]):
+                for c2 in candidates[i+1:15]:
+                    pair_score = c1['score'] + c2['score']
+
                     if is_vertical:
-                        # For vertical orientation, check Y separation
-                        y1, y2 = c1['center'][1], c2['center'][1]
-                        separation = abs(y1 - y2)
-                        min_sep = min(c1['bbox'][3], c2['bbox'][3]) * 0.5  # At least half a lens height apart
-                        max_sep = max(h * 0.8, c1['bbox'][3] + c2['bbox'][3] + 200)
-
-                        if min_sep < separation < max_sep:
-                            # Check they're roughly aligned horizontally
-                            x_diff = abs(c1['center'][0] - c2['center'][0])
-                            if x_diff < max(c1['bbox'][2], c2['bbox'][2]) * 1.5:
-                                # Assign based on Y position (top = left in vertical orientation)
-                                if y1 < y2:
-                                    left_contour = c1['contour']
-                                    right_contour = c2['contour']
-                                else:
-                                    left_contour = c2['contour']
-                                    right_contour = c1['contour']
-                                confidence = (c1['score'] + c2['score']) / 2 * 100
-                                break
+                        separation = abs(c1['center'][1] - c2['center'][1])
+                        alignment = abs(c1['center'][0] - c2['center'][0])
+                        size_ref = max(c1['bbox'][3], c2['bbox'][3])
                     else:
-                        # For horizontal orientation, check X separation
-                        x1, x2 = c1['center'][0], c2['center'][0]
-                        separation = abs(x1 - x2)
-                        min_sep = min(c1['bbox'][2], c2['bbox'][2]) * 0.5
-                        max_sep = max(w * 0.8, c1['bbox'][2] + c2['bbox'][2] + 200)
+                        separation = abs(c1['center'][0] - c2['center'][0])
+                        alignment = abs(c1['center'][1] - c2['center'][1])
+                        size_ref = max(c1['bbox'][2], c2['bbox'][2])
 
-                        if min_sep < separation < max_sep:
-                            # Check they're roughly aligned vertically
-                            y_diff = abs(c1['center'][1] - c2['center'][1])
-                            if y_diff < max(c1['bbox'][3], c2['bbox'][3]) * 1.5:
-                                if x1 < x2:
-                                    left_contour = c1['contour']
-                                    right_contour = c2['contour']
-                                else:
-                                    left_contour = c2['contour']
-                                    right_contour = c1['contour']
-                                confidence = (c1['score'] + c2['score']) / 2 * 100
-                                break
+                    if separation < size_ref * 0.3:
+                        continue
+                    if separation > (img_w if not is_vertical else img_h) * 0.9:
+                        continue
+                    if alignment > size_ref * 2:
+                        continue
 
-                if left_contour is not None:
-                    break
+                    size_ratio = min(c1['area'], c2['area']) / (max(c1['area'], c2['area']) + 1e-6)
+                    if size_ratio < 0.4:
+                        continue
 
-        # If we couldn't find a pair, use the best single contour
+                    pair_score *= (1 + size_ratio)
+                    pair_score *= (1 + min(1, separation / size_ref))
+
+                    if pair_score > best_pair_score:
+                        best_pair_score = pair_score
+
+                        if is_vertical:
+                            if c1['center'][1] < c2['center'][1]:
+                                left_contour = c1['contour']
+                                right_contour = c2['contour']
+                            else:
+                                left_contour = c2['contour']
+                                right_contour = c1['contour']
+                        else:
+                            if c1['center'][0] < c2['center'][0]:
+                                left_contour = c1['contour']
+                                right_contour = c2['contour']
+                            else:
+                                left_contour = c2['contour']
+                                right_contour = c1['contour']
+
+                        confidence = min(95, (c1['score'] + c2['score']) / 2 * 100 * 1.2)
+
         if left_contour is None and len(candidates) >= 1:
             best = candidates[0]
-            # Determine position based on orientation
             if is_vertical:
                 if best['center'][1] < image_center_y:
                     left_contour = best['contour']
@@ -359,9 +534,9 @@ class ContourDetector:
                     left_contour = best['contour']
                 else:
                     right_contour = best['contour']
-            confidence = best['score'] * 60
+            confidence = best['score'] * 50
 
-        return left_contour, right_contour, max(min_confidence * 100, confidence)
+        return left_contour, right_contour, confidence
 
     def _calculate_center(self, contour: np.ndarray) -> Tuple[float, float]:
         """Calculate the centroid of a contour."""
@@ -374,63 +549,35 @@ class ContourDetector:
         return (cx, cy)
 
     def smooth_contour(self, contour: np.ndarray, smoothing_factor: float = 0.01) -> np.ndarray:
-        """
-        Smooth a contour using spline interpolation.
-
-        Args:
-            contour: Input contour points
-            smoothing_factor: Amount of smoothing (0 = no smoothing)
-
-        Returns:
-            Smoothed contour
-        """
+        """Smooth a contour using spline interpolation."""
         if len(contour) < 10:
             return contour
 
-        # Reshape contour
         points = contour.reshape(-1, 2)
 
-        # Close the contour
         if not np.allclose(points[0], points[-1]):
             points = np.vstack([points, points[0]])
 
-        # Fit spline
         try:
             tck, u = splprep([points[:, 0], points[:, 1]], s=smoothing_factor * len(points), per=True)
-
-            # Evaluate spline at more points
             u_new = np.linspace(0, 1, 500)
             x_new, y_new = splev(u_new, tck)
-
             smoothed = np.column_stack([x_new, y_new]).reshape(-1, 1, 2).astype(np.int32)
             return smoothed
-
         except Exception:
             return contour
 
     def resample_contour(self, contour: np.ndarray, num_points: int = 1000) -> np.ndarray:
-        """
-        Resample contour to have exactly num_points points, evenly spaced.
-
-        Args:
-            contour: Input contour
-            num_points: Desired number of points
-
-        Returns:
-            Resampled contour with num_points points
-        """
+        """Resample contour to have exactly num_points points, evenly spaced."""
         points = contour.reshape(-1, 2).astype(np.float64)
 
-        # Calculate cumulative arc length
         diffs = np.diff(points, axis=0)
         distances = np.sqrt((diffs ** 2).sum(axis=1))
         cumulative = np.concatenate([[0], np.cumsum(distances)])
         total_length = cumulative[-1]
 
-        # Generate evenly spaced arc lengths
         target_lengths = np.linspace(0, total_length, num_points, endpoint=False)
 
-        # Interpolate points at target arc lengths
         resampled = np.zeros((num_points, 2))
         for i, target in enumerate(target_lengths):
             idx = np.searchsorted(cumulative, target)
@@ -439,7 +586,6 @@ class ContourDetector:
             elif idx >= len(points):
                 resampled[i] = points[-1]
             else:
-                # Linear interpolation
                 t = (target - cumulative[idx-1]) / (cumulative[idx] - cumulative[idx-1] + 1e-10)
                 resampled[i] = points[idx-1] + t * (points[idx] - points[idx-1])
 

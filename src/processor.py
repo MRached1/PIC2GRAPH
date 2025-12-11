@@ -16,6 +16,7 @@ from contour_detector import ContourDetector
 from measurements import MeasurementCalculator, FrameMeasurements
 from polar_converter import PolarConverter
 from dat_generator import DATGenerator, DATFileData
+from image_aligner import ImageAligner
 
 
 @dataclass
@@ -27,6 +28,10 @@ class ProcessingResult:
     # Calibration
     pixels_per_mm: float = 0.0
     grid_confidence: float = 0.0
+
+    # Alignment
+    rotation_applied: float = 0.0
+    alignment_confidence: float = 0.0
 
     # Detection
     left_contour: Optional[np.ndarray] = None
@@ -45,6 +50,8 @@ class ProcessingResult:
     left_radii: list = field(default_factory=list)
 
     # Images
+    original_image: Optional[np.ndarray] = None
+    aligned_image: Optional[np.ndarray] = None
     processed_image: Optional[np.ndarray] = None
     preview_image: Optional[np.ndarray] = None
 
@@ -83,6 +90,7 @@ class ImageProcessor:
         self.grid_size_mm = grid_size_mm
         self.grid_detector = GridDetector(grid_size_mm=grid_size_mm)
         self.perspective_corrector = PerspectiveCorrector()
+        self.image_aligner = ImageAligner()
         self.contour_detector = ContourDetector()
         self.polar_converter = PolarConverter(num_points=1000)
         self.dat_generator = DATGenerator()
@@ -90,6 +98,7 @@ class ImageProcessor:
         # Processing options
         self.max_image_size = 2000  # Resize images larger than this
         self.contour_smoothing = 0.01
+        self.enable_alignment = True  # Enable automatic image alignment
 
     def process_image(self, image_path: str) -> ProcessingResult:
         """
@@ -110,8 +119,9 @@ class ImageProcessor:
                 result.error_message = f"Could not load image: {image_path}"
                 return result
 
-            # Step 2: Grid detection and calibration (before perspective correction)
-            # We detect grid first to decide if perspective correction is needed
+            result.original_image = image.copy()
+
+            # Step 2: Grid detection and calibration (before alignment)
             pixels_per_mm, grid_conf = self.grid_detector.detect_grid(image)
             result.pixels_per_mm = pixels_per_mm
             result.grid_confidence = grid_conf
@@ -120,13 +130,33 @@ class ImageProcessor:
                 result.error_message = "Failed to detect grid. Please ensure grid paper is visible."
                 return result
 
-            # Note: Grid alignment is disabled for now as it can distort the image
-            # The grid detection works well enough without it for most photos
-            # TODO: Add optional rotation-only alignment based on detected grid angle
+            # Step 3: Image alignment (rotation correction)
+            # This corrects for tilted photos based on grid lines and glasses orientation
+            if self.enable_alignment:
+                aligned_image, rotation_angle = self.image_aligner.align_image(
+                    image,
+                    grid_lines_h=self.grid_detector.grid_lines_horizontal,
+                    grid_lines_v=self.grid_detector.grid_lines_vertical,
+                    use_glasses_detection=True
+                )
+                result.rotation_applied = rotation_angle
+                result.alignment_confidence = self.image_aligner.confidence * 100
+
+                # If significant rotation was applied, re-detect grid on aligned image
+                # for better calibration accuracy
+                if abs(rotation_angle) > 1.0:
+                    pixels_per_mm_new, grid_conf_new = self.grid_detector.detect_grid(aligned_image)
+                    if grid_conf_new > grid_conf:
+                        result.pixels_per_mm = pixels_per_mm_new
+                        result.grid_confidence = grid_conf_new
+                        pixels_per_mm = pixels_per_mm_new
+
+                image = aligned_image
+                result.aligned_image = aligned_image
 
             result.processed_image = image
 
-            # Step 5: Contour detection
+            # Step 4: Contour detection
             left_contour, right_contour, contour_conf = self.contour_detector.detect_contours(image)
             result.contour_confidence = contour_conf
             result.detection_method = self.contour_detector.detection_method
@@ -183,7 +213,7 @@ class ImageProcessor:
 
             # Create preview image
             result.preview_image = self._create_preview(
-                image, left_contour, right_contour, measurements
+                image, left_contour, right_contour, measurements, result.rotation_applied
             )
 
             result.success = True
@@ -260,7 +290,8 @@ class ImageProcessor:
     def _create_preview(self, image: np.ndarray,
                         left_contour: Optional[np.ndarray],
                         right_contour: Optional[np.ndarray],
-                        measurements: FrameMeasurements) -> np.ndarray:
+                        measurements: FrameMeasurements,
+                        rotation_applied: float = 0.0) -> np.ndarray:
         """Create a preview image with contours and measurements overlaid."""
         preview = image.copy()
 
@@ -294,6 +325,12 @@ class ImageProcessor:
         text_y += 30
         cv2.putText(preview, f"DBL: {measurements.dbl_mm:.2f}mm",
                    (10, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        # Show rotation applied if significant
+        if abs(rotation_applied) > 0.5:
+            text_y += 30
+            cv2.putText(preview, f"Rotation: {rotation_applied:.1f} deg",
+                       (10, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         return preview
 
@@ -335,6 +372,8 @@ def process_and_save(image_path: str, output_dir: str = None,
         'circ_mm': result.circ_mm,
         'grid_confidence': result.grid_confidence,
         'contour_confidence': result.contour_confidence,
+        'rotation_applied': result.rotation_applied,
+        'alignment_confidence': result.alignment_confidence,
     }
 
     message = f"Success! DAT file saved to: {dat_path}"
