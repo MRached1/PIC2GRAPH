@@ -11,6 +11,8 @@ from PIL import Image, ImageTk
 import os
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from grid_detector import GridDetector
 from perspective_corrector import PerspectiveCorrector
@@ -37,6 +39,7 @@ class AppState:
     rotation_applied: float = 0.0
     alignment_confidence: float = 0.0
     image_path: str = ""
+    last_dat_path: str = ""
 
 
 class PIC2GRAPHGUI:
@@ -162,6 +165,8 @@ class PIC2GRAPHGUI:
             row=2, column=0, columnspan=4, sticky="ew", pady=2)
         ttk.Button(file_frame, text="Generate DAT File", command=self._generate_dat).grid(
             row=3, column=0, columnspan=4, sticky="ew", pady=2)
+        ttk.Button(file_frame, text="Visualize DAT File", command=self._visualize_dat).grid(
+            row=4, column=0, columnspan=4, sticky="ew", pady=2)
 
         file_frame.columnconfigure(1, weight=1)
         file_frame.columnconfigure(2, weight=1)
@@ -1356,6 +1361,7 @@ class PIC2GRAPHGUI:
                 return
 
             self.dat_generator.generate(data, filepath)
+            self.state.last_dat_path = filepath
 
             self.status_var.set(f"DAT file saved: {os.path.basename(filepath)}")
             messagebox.showinfo(
@@ -1373,6 +1379,204 @@ class PIC2GRAPHGUI:
             messagebox.showerror("Error", f"Failed to generate DAT file: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def _visualize_dat(self):
+        """Visualize a DAT file showing the lens shapes."""
+        # Ask user to select a DAT file, defaulting to last generated one
+        initial_dir = os.path.dirname(self.state.last_dat_path) if self.state.last_dat_path else os.getcwd()
+        initial_file = os.path.basename(self.state.last_dat_path) if self.state.last_dat_path else ""
+
+        filepath = filedialog.askopenfilename(
+            title="Select DAT File to Visualize",
+            initialdir=initial_dir,
+            initialfile=initial_file,
+            filetypes=[("DAT files", "*.DAT"), ("All files", "*.*")]
+        )
+
+        if not filepath:
+            return
+
+        try:
+            # Parse the DAT file
+            right_radii, left_radii, metadata = self._parse_dat_file(filepath)
+
+            if not right_radii and not left_radii:
+                messagebox.showerror("Error", "No radii data found in the DAT file.")
+                return
+
+            # Create visualization window
+            self._show_dat_visualization(right_radii, left_radii, metadata, filepath)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to visualize DAT file: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _parse_dat_file(self, filepath: str) -> Tuple[List[int], List[int], dict]:
+        """Parse a DAT file and extract radii and metadata."""
+        with open(filepath, 'r') as f:
+            content = f.read()
+
+        lines = content.strip().split('\n')
+
+        right_radii = []
+        left_radii = []
+        current_side = None
+        metadata = {}
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith('TRCFMT='):
+                parts = line.split(';')
+                if 'R' in parts:
+                    current_side = 'R'
+                elif 'L' in parts:
+                    current_side = 'L'
+            elif line.startswith('R='):
+                values = line[2:].split(';')
+                radii = [int(v) for v in values]
+                if current_side == 'R':
+                    right_radii.extend(radii)
+                elif current_side == 'L':
+                    left_radii.extend(radii)
+            elif '=' in line and not line.startswith('R='):
+                key, _, value = line.partition('=')
+                metadata[key] = value
+
+        return right_radii, left_radii, metadata
+
+    def _polar_to_cartesian(self, radii: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+        """Convert polar radii (in centimicrons) to cartesian coordinates (in mm)."""
+        radii_mm = np.array(radii) / 100.0
+        num_points = len(radii)
+        angles = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+
+        x = radii_mm * np.cos(angles)
+        y = radii_mm * np.sin(angles)
+
+        return x, y
+
+    def _show_dat_visualization(self, right_radii: List[int], left_radii: List[int],
+                                 metadata: dict, filepath: str):
+        """Show a visualization window for the DAT file."""
+        # Create a new top-level window
+        viz_window = tk.Toplevel(self.root)
+        viz_window.title(f"DAT Visualization - {os.path.basename(filepath)}")
+        viz_window.geometry("1200x600")
+
+        # Create matplotlib figure
+        fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+
+        # Convert to cartesian
+        if right_radii:
+            rx, ry = self._polar_to_cartesian(right_radii)
+        else:
+            rx, ry = np.array([]), np.array([])
+
+        if left_radii:
+            lx, ly = self._polar_to_cartesian(left_radii)
+        else:
+            lx, ly = np.array([]), np.array([])
+
+        # Plot Right Lens
+        ax1 = axes[0]
+        if len(rx) > 0:
+            ax1.plot(rx, ry, 'b-', linewidth=1.5)
+            ax1.fill(rx, ry, alpha=0.3, color='blue')
+        ax1.set_aspect('equal')
+        ax1.set_title('Right Lens (R)', fontsize=12, fontweight='bold')
+        ax1.set_xlabel('mm')
+        ax1.set_ylabel('mm')
+        ax1.grid(True, linestyle='--', alpha=0.5)
+        ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+        ax1.axvline(x=0, color='k', linestyle='-', linewidth=0.5)
+
+        # Plot Left Lens
+        ax2 = axes[1]
+        if len(lx) > 0:
+            ax2.plot(lx, ly, 'r-', linewidth=1.5)
+            ax2.fill(lx, ly, alpha=0.3, color='red')
+        ax2.set_aspect('equal')
+        ax2.set_title('Left Lens (L)', fontsize=12, fontweight='bold')
+        ax2.set_xlabel('mm')
+        ax2.set_ylabel('mm')
+        ax2.grid(True, linestyle='--', alpha=0.5)
+        ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+        ax2.axvline(x=0, color='k', linestyle='-', linewidth=0.5)
+
+        # Plot Both Lenses Together (as worn)
+        ax3 = axes[2]
+        dbl = float(metadata.get('DBL', '20'))
+        half_dbl = dbl / 2
+
+        if len(rx) > 0:
+            # Right lens shifted right (from wearer's perspective, right lens is on left side of plot)
+            rx_shifted = rx + half_dbl + np.max(rx) if len(rx) > 0 else rx
+            ax3.plot(rx_shifted, ry, 'b-', linewidth=1.5, label='Right (R)')
+            ax3.fill(rx_shifted, ry, alpha=0.3, color='blue')
+
+        if len(lx) > 0:
+            # Left lens mirrored and shifted left (from wearer's perspective, left lens is on right side)
+            lx_shifted = -lx - half_dbl - np.max(lx) if len(lx) > 0 else lx
+            ax3.plot(lx_shifted, ly, 'r-', linewidth=1.5, label='Left (L)')
+            ax3.fill(lx_shifted, ly, alpha=0.3, color='red')
+
+        ax3.set_aspect('equal')
+        ax3.set_title('Complete Frame (As Worn)', fontsize=12, fontweight='bold')
+        ax3.set_xlabel('mm')
+        ax3.set_ylabel('mm')
+        ax3.grid(True, linestyle='--', alpha=0.5)
+        ax3.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+        ax3.axvline(x=0, color='k', linestyle='-', linewidth=0.5)
+        ax3.legend(loc='upper right')
+
+        # Add metadata text
+        info_lines = [
+            f"Job: {metadata.get('JOB', 'N/A')}",
+            f"DBL: {metadata.get('DBL', 'N/A')} mm",
+            f"HBOX: {metadata.get('HBOX', 'N/A')} mm",
+            f"VBOX: {metadata.get('VBOX', 'N/A')} mm",
+            f"CIRC: {metadata.get('CIRC', 'N/A')} mm",
+            f"Points: R={len(right_radii)}, L={len(left_radii)}"
+        ]
+        info_text = '\n'.join(info_lines)
+        fig.text(0.02, 0.02, info_text, fontsize=9, verticalalignment='bottom',
+                 family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        fig.suptitle('HOYA GT5000 Eyeglass Frame Shape', fontsize=14, fontweight='bold')
+        plt.tight_layout(rect=[0, 0.1, 1, 0.95])
+
+        # Embed in tkinter window
+        canvas_frame = ttk.Frame(viz_window)
+        canvas_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        # Add buttons frame
+        btn_frame = ttk.Frame(viz_window)
+        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        def save_image():
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+                initialfile=os.path.splitext(os.path.basename(filepath))[0] + "_visualization.png"
+            )
+            if save_path:
+                fig.savefig(save_path, dpi=150, bbox_inches='tight')
+                messagebox.showinfo("Saved", f"Visualization saved to:\n{save_path}")
+
+        ttk.Button(btn_frame, text="Save Image", command=save_image).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Close", command=viz_window.destroy).pack(side="right", padx=5)
+
+        # Handle window close to properly clean up matplotlib figure
+        def on_close():
+            plt.close(fig)
+            viz_window.destroy()
+
+        viz_window.protocol("WM_DELETE_WINDOW", on_close)
 
     def _update_confidence_display(self):
         """Update confidence indicators."""

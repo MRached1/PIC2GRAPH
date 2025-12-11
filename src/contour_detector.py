@@ -505,35 +505,42 @@ class ContourDetector:
                     if pair_score > best_pair_score:
                         best_pair_score = pair_score
 
+                        # IMPORTANT: When viewing glasses from above (as in a photo),
+                        # the lens on the LEFT side of the image is the WEARER'S RIGHT eye,
+                        # and the lens on the RIGHT side is the WEARER'S LEFT eye.
+                        # The Hoya GT5000 format uses wearer's perspective (R=right eye, L=left eye).
                         if is_vertical:
+                            # Vertical orientation: top lens = wearer's right, bottom = wearer's left
                             if c1['center'][1] < c2['center'][1]:
-                                left_contour = c1['contour']
-                                right_contour = c2['contour']
+                                right_contour = c1['contour']  # Top = wearer's right
+                                left_contour = c2['contour']   # Bottom = wearer's left
                             else:
-                                left_contour = c2['contour']
-                                right_contour = c1['contour']
+                                right_contour = c2['contour']
+                                left_contour = c1['contour']
                         else:
+                            # Horizontal orientation: image-left = wearer's right, image-right = wearer's left
                             if c1['center'][0] < c2['center'][0]:
-                                left_contour = c1['contour']
-                                right_contour = c2['contour']
+                                right_contour = c1['contour']  # Image-left = wearer's right
+                                left_contour = c2['contour']   # Image-right = wearer's left
                             else:
-                                left_contour = c2['contour']
-                                right_contour = c1['contour']
+                                right_contour = c2['contour']
+                                left_contour = c1['contour']
 
                         confidence = min(95, (c1['score'] + c2['score']) / 2 * 100 * 1.2)
 
         if left_contour is None and len(candidates) >= 1:
             best = candidates[0]
+            # Same perspective swap: image-left = wearer's right
             if is_vertical:
                 if best['center'][1] < image_center_y:
-                    left_contour = best['contour']
+                    right_contour = best['contour']  # Top = wearer's right
                 else:
-                    right_contour = best['contour']
+                    left_contour = best['contour']   # Bottom = wearer's left
             else:
                 if best['center'][0] < image_center_x:
-                    left_contour = best['contour']
+                    right_contour = best['contour']  # Image-left = wearer's right
                 else:
-                    right_contour = best['contour']
+                    left_contour = best['contour']   # Image-right = wearer's left
             confidence = best['score'] * 50
 
         return left_contour, right_contour, confidence

@@ -60,7 +60,10 @@ class PolarConverter:
 
         for angle in self.angles:
             # Create a ray from center in this direction
-            ray_dir = np.array([np.cos(angle), np.sin(angle)])
+            # Note: OpenCV uses image coordinates where Y increases downward,
+            # but the Hoya GT5000 format uses standard math coords (Y up).
+            # We invert the Y component to correct for this.
+            ray_dir = np.array([np.cos(angle), -np.sin(angle)])
 
             # Find intersection with contour
             radius = self._ray_contour_intersection(centered_points, ray_dir)
@@ -160,9 +163,9 @@ class PolarConverter:
         # Generate angles
         angles = np.linspace(0, 2 * np.pi, len(radii_centimicrons), endpoint=False)
 
-        # Convert to Cartesian
+        # Convert to Cartesian (invert Y to match image coordinates)
         x = radii_pixels * np.cos(angles) + center[0]
-        y = radii_pixels * np.sin(angles) + center[1]
+        y = -radii_pixels * np.sin(angles) + center[1]  # Negative for image coords
 
         contour = np.column_stack([x, y]).reshape(-1, 1, 2).astype(np.int32)
 
@@ -199,22 +202,24 @@ class PolarConverter:
         """
         Mirror radii horizontally (for creating left lens from right).
 
-        This effectively reverses the angle direction:
-        - Original 0° -> 180°
-        - Original 90° -> 90°
-        - Original 180° -> 0°
-        - Original 270° -> 270°
-        """
-        # Flip horizontally: angle θ becomes 180° - θ (or π - θ)
-        # In terms of indices: index i becomes (n/2 - i) mod n for first half
-        # and (3n/2 - i) mod n for second half
+        This mirrors across the vertical axis (nasal-temporal line):
+        - Original 0° (nasal) -> 180° (now nasal on left lens)
+        - Original 90° (superior) -> 90° (stays superior)
+        - Original 180° (temporal) -> 0° (now temporal on left lens)
+        - Original 270° (inferior) -> 270° (stays inferior)
 
+        The transformation is: new_angle = 180° - old_angle (mod 360°)
+        In index terms with n points: new_index = (n/2 - i) mod n
+        """
         n = len(radii)
+        half_n = n // 2
         mirrored = [0] * n
 
         for i in range(n):
-            # New index after horizontal flip
-            new_i = (n - i) % n
+            # Horizontal mirror: angle θ becomes (180° - θ) = (π - θ)
+            # With n=1000 points, index i corresponds to angle (i * 360 / n)
+            # New angle = 180 - original = (n/2 - i) * 360 / n
+            new_i = (half_n - i) % n
             mirrored[new_i] = radii[i]
 
         return mirrored
