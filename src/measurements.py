@@ -130,60 +130,72 @@ class MeasurementCalculator:
                        right_contour: Optional[np.ndarray]) -> float:
         """
         Calculate DBL (Distance Between Lenses) - the bridge width.
-        Measured as the horizontal distance between the inner edges of the two lenses.
+        Uses precise method to find actual inner edges at bridge level.
         """
         if left_contour is None or right_contour is None:
             return 0.0
 
-        # Get bounding boxes
-        left_x, _, left_w, _ = cv2.boundingRect(left_contour)
-        right_x, _, right_w, _ = cv2.boundingRect(right_contour)
-
-        # Inner edges
-        left_inner = left_x + left_w  # Right edge of left lens
-        right_inner = right_x  # Left edge of right lens
-
-        # DBL is the gap between them
-        dbl_pixels = abs(right_inner - left_inner)
-
-        return round(self._pixels_to_mm(dbl_pixels), 2)
+        # Use precise calculation
+        return self._calculate_dbl_precise(left_contour, right_contour)
 
     def _calculate_dbl_precise(self,
                                left_contour: np.ndarray,
                                right_contour: np.ndarray) -> float:
         """
-        Calculate DBL more precisely by finding the closest points at the bridge level.
+        Calculate DBL precisely by finding the closest points at the bridge level.
+        The bridge is typically at the nasal (inner) edge where lenses are closest.
         """
-        # Find the vertical center (bridge level)
         left_points = left_contour.reshape(-1, 2)
         right_points = right_contour.reshape(-1, 2)
 
-        # Get the y-coordinates of centers
+        # First, ensure left is actually on the left and right is on the right
+        left_center_x = np.mean(left_points[:, 0])
+        right_center_x = np.mean(right_points[:, 0])
+
+        if left_center_x > right_center_x:
+            # Swap them
+            left_points, right_points = right_points, left_points
+
+        # Get the y-coordinates of centers (bridge level)
         left_center_y = np.mean(left_points[:, 1])
         right_center_y = np.mean(right_points[:, 1])
         bridge_y = (left_center_y + right_center_y) / 2
 
-        # Find points near the bridge level (within 20% of lens height)
+        # Find points near the bridge level (within 30% of lens height for more coverage)
         left_y_range = left_points[:, 1].max() - left_points[:, 1].min()
         right_y_range = right_points[:, 1].max() - right_points[:, 1].min()
-        y_tolerance = min(left_y_range, right_y_range) * 0.2
+        y_tolerance = min(left_y_range, right_y_range) * 0.3
 
         # Filter points near bridge level
-        left_bridge_points = left_points[
-            np.abs(left_points[:, 1] - bridge_y) < y_tolerance
-        ]
-        right_bridge_points = right_points[
-            np.abs(right_points[:, 1] - bridge_y) < y_tolerance
-        ]
+        left_bridge_mask = np.abs(left_points[:, 1] - bridge_y) < y_tolerance
+        right_bridge_mask = np.abs(right_points[:, 1] - bridge_y) < y_tolerance
+
+        left_bridge_points = left_points[left_bridge_mask]
+        right_bridge_points = right_points[right_bridge_mask]
 
         if len(left_bridge_points) == 0 or len(right_bridge_points) == 0:
-            return self._calculate_dbl(left_contour, right_contour)
+            # Fallback to bounding box method
+            left_x, _, left_w, _ = cv2.boundingRect(left_contour)
+            right_x, _, _, _ = cv2.boundingRect(right_contour)
+            left_inner = left_x + left_w
+            right_inner = right_x
+            dbl_pixels = abs(right_inner - left_inner)
+            return round(self._pixels_to_mm(dbl_pixels), 2)
 
-        # Find the innermost points (rightmost of left, leftmost of right)
+        # Find the innermost points at bridge level
+        # For left lens: find the rightmost (max x) points
+        # For right lens: find the leftmost (min x) points
         left_inner_x = left_bridge_points[:, 0].max()
         right_inner_x = right_bridge_points[:, 0].min()
 
-        dbl_pixels = abs(right_inner_x - left_inner_x)
+        # Calculate DBL
+        dbl_pixels = right_inner_x - left_inner_x
+
+        # DBL should be positive (right inner edge is to the right of left inner edge)
+        if dbl_pixels < 0:
+            # Something is wrong - lenses might be overlapping in detection
+            # Use absolute value
+            dbl_pixels = abs(dbl_pixels)
 
         return round(self._pixels_to_mm(dbl_pixels), 2)
 

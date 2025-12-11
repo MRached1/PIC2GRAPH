@@ -9,24 +9,26 @@ from typing import Tuple, Optional, List
 
 
 class GridDetector:
-    """Detects grid paper and provides calibration for measurements."""
+    """Detects reference square and provides calibration for measurements."""
 
-    def __init__(self, grid_size_mm: float = 8.0):
+    def __init__(self, grid_size_mm: float = 15.0):
         """
         Initialize grid detector.
 
         Args:
-            grid_size_mm: Size of grid squares in millimeters (default 8mm)
+            grid_size_mm: Size of reference square in millimeters (default 15mm)
         """
         self.grid_size_mm = grid_size_mm
         self.pixels_per_mm: Optional[float] = None
         self.grid_lines_horizontal: List[np.ndarray] = []
         self.grid_lines_vertical: List[np.ndarray] = []
         self.confidence: float = 0.0
+        # Reference square detection results
+        self.reference_square: Optional[Tuple[int, int, int, int]] = None  # (x, y, w, h)
 
     def detect_grid(self, image: np.ndarray) -> Tuple[float, float]:
         """
-        Detect grid lines and calculate pixels per mm.
+        Detect reference square and calculate pixels per mm.
 
         Args:
             image: Input image (BGR format)
@@ -34,7 +36,14 @@ class GridDetector:
         Returns:
             Tuple of (pixels_per_mm, confidence)
         """
-        # Try multiple detection methods and use the best result
+        # Primary method: Detect the reference square with "A" inside
+        result_ref = self._detect_reference_square(image)
+        if result_ref[0] > 0 and result_ref[1] > 70:
+            self.pixels_per_mm = result_ref[0]
+            self.confidence = result_ref[1]
+            return result_ref
+
+        # Fallback to other methods if reference square not found
         results = []
 
         # Method 1: Standard Hough line detection
@@ -58,8 +67,6 @@ class GridDetector:
             results.append(('morpho', result4))
 
         # Select best result based on confidence, but validate ppm is reasonable
-        # For typical phone photos of grid paper, ppm should be roughly 1-20 pixels/mm
-        # (depends on resolution and how close photo was taken)
         valid_results = []
         for method, (ppm, conf) in results:
             # Validate ppm is in reasonable range
@@ -77,6 +84,143 @@ class GridDetector:
 
         # Fallback
         return self._detect_grid_fallback(image)
+
+    def _detect_reference_square(self, image: np.ndarray) -> Tuple[float, float]:
+        """
+        Detect the reference square (with 'A' inside) for calibration.
+        The reference square is 15x15mm.
+
+        Returns:
+            Tuple of (pixels_per_mm, confidence)
+        """
+        img_h, img_w = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Apply multiple thresholding methods to find the square
+        # Method 1: Adaptive threshold
+        binary1 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                         cv2.THRESH_BINARY_INV, 21, 5)
+
+        # Method 2: Otsu threshold
+        _, binary2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Method 3: Simple threshold for dark lines on white paper
+        _, binary3 = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+
+        # Try each binary image
+        square_candidates = []
+
+        for binary in [binary1, binary2, binary3]:
+            # Clean up the binary image
+            kernel = np.ones((3, 3), np.uint8)
+            binary_clean = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+            # Find contours
+            contours, hierarchy = cv2.findContours(binary_clean, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+            if not contours:
+                continue
+
+            for i, contour in enumerate(contours):
+                area = cv2.contourArea(contour)
+
+                # Filter by area - reference square should be reasonable size
+                min_area = (min(img_w, img_h) * 0.02) ** 2
+                max_area = (min(img_w, img_h) * 0.20) ** 2
+
+                if area < min_area or area > max_area:
+                    continue
+
+                x, y, w, h = cv2.boundingRect(contour)
+
+                # Check if it's roughly square (aspect ratio close to 1)
+                aspect_ratio = w / h if h > 0 else 0
+                if not (0.7 < aspect_ratio < 1.4):
+                    continue
+
+                # Check solidity
+                hull = cv2.convexHull(contour)
+                hull_area = cv2.contourArea(hull)
+                solidity = area / hull_area if hull_area > 0 else 0
+
+                # For hand-drawn squares, solidity might be lower
+                if solidity < 0.5:
+                    continue
+
+                # Check if there's content inside (the "A" letter)
+                inner_margin = int(min(w, h) * 0.15)
+                if inner_margin < 5:
+                    continue
+
+                inner_y1 = max(0, y + inner_margin)
+                inner_y2 = min(img_h, y + h - inner_margin)
+                inner_x1 = max(0, x + inner_margin)
+                inner_x2 = min(img_w, x + w - inner_margin)
+
+                if inner_y2 <= inner_y1 or inner_x2 <= inner_x1:
+                    continue
+
+                inner_roi = gray[inner_y1:inner_y2, inner_x1:inner_x2]
+
+                if inner_roi.size == 0:
+                    continue
+
+                # Look for dark pixels inside (the letter "A")
+                _, inner_binary = cv2.threshold(inner_roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                dark_ratio = np.sum(inner_binary > 0) / inner_binary.size
+
+                # There should be some dark content (the "A") but not too much
+                # Relaxed constraints for hand-drawn content
+                if 0.02 < dark_ratio < 0.6:
+                    # Calculate score - prefer squares with content inside
+                    squareness = 1.0 - abs(1.0 - aspect_ratio)
+                    # Boost score for having content inside
+                    content_score = 1.0 + (dark_ratio * 2) if 0.05 < dark_ratio < 0.4 else 1.0
+                    score = squareness * solidity * content_score
+
+                    square_candidates.append({
+                        'contour': contour,
+                        'bbox': (x, y, w, h),
+                        'area': area,
+                        'aspect_ratio': aspect_ratio,
+                        'solidity': solidity,
+                        'has_content': dark_ratio,
+                        'score': score
+                    })
+
+        if not square_candidates:
+            return 0, 0
+
+        # Remove duplicates (same bbox appearing from different threshold methods)
+        unique_candidates = []
+        seen_bboxes = set()
+        for c in square_candidates:
+            bbox_key = (c['bbox'][0] // 10, c['bbox'][1] // 10, c['bbox'][2] // 10, c['bbox'][3] // 10)
+            if bbox_key not in seen_bboxes:
+                seen_bboxes.add(bbox_key)
+                unique_candidates.append(c)
+
+        if not unique_candidates:
+            return 0, 0
+
+        # Sort by score and pick the best
+        unique_candidates.sort(key=lambda x: x['score'], reverse=True)
+        best = unique_candidates[0]
+
+        x, y, w, h = best['bbox']
+
+        # Store the reference square location
+        self.reference_square = (x, y, w, h)
+
+        # Calculate pixels per mm
+        # The reference square is 15x15mm, use average of width and height
+        avg_size_px = (w + h) / 2
+        pixels_per_mm = avg_size_px / self.grid_size_mm
+
+        # Calculate confidence based on squareness and detection quality
+        confidence = min(95, best['score'] * 80 + 20)
+
+        return pixels_per_mm, confidence
 
     def _detect_grid_hough(self, image: np.ndarray) -> Tuple[float, float]:
         """Standard Hough line detection method."""

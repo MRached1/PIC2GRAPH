@@ -71,3 +71,6 @@ preview.png
 
 # Test images (keep sample in DOC/)
 test_images/
+
+# Terminal Paste Image folder
+.cp-images/

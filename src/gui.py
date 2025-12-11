@@ -51,7 +51,7 @@ class PIC2GRAPHGUI:
         self.state = AppState()
 
         # Processing modules
-        self.grid_detector = GridDetector(grid_size_mm=8.0)
+        self.grid_detector = GridDetector(grid_size_mm=15.0)
         self.perspective_corrector = PerspectiveCorrector()
         self.image_aligner = ImageAligner()
         self.contour_detector = ContourDetector()
@@ -101,30 +101,59 @@ class PIC2GRAPHGUI:
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<Button-3>", self._on_canvas_right_click)  # Right-click to add point
 
-        # Right panel - Controls and measurements
-        right_panel = ttk.Frame(main_frame)
-        right_panel.grid(row=0, column=1, sticky="nsew")
+        # Right panel - Controls and measurements (with scrollbar)
+        right_container = ttk.Frame(main_frame)
+        right_container.grid(row=0, column=1, sticky="nsew")
+
+        # Create canvas and scrollbar for right panel
+        right_canvas = tk.Canvas(right_container, width=320, highlightthickness=0)
+        right_scrollbar = ttk.Scrollbar(right_container, orient="vertical", command=right_canvas.yview)
+        right_panel = ttk.Frame(right_canvas)
+
+        right_panel.bind("<Configure>", lambda e: right_canvas.configure(scrollregion=right_canvas.bbox("all")))
+        right_canvas.create_window((0, 0), window=right_panel, anchor="nw")
+        right_canvas.configure(yscrollcommand=right_scrollbar.set)
+
+        right_canvas.pack(side="left", fill="both", expand=True)
+        right_scrollbar.pack(side="right", fill="y")
+
+        # Enable mousewheel scrolling
+        def _on_mousewheel(event):
+            right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        right_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         main_frame.columnconfigure(0, weight=3)
-        main_frame.columnconfigure(1, weight=1)
+        main_frame.columnconfigure(1, weight=0)
         main_frame.rowconfigure(0, weight=1)
 
         # File operations
-        file_frame = ttk.LabelFrame(right_panel, text="File Operations", padding="10")
-        file_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        file_frame = ttk.LabelFrame(right_panel, text="File Operations", padding="5")
+        file_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
 
         ttk.Button(file_frame, text="Load Image", command=self._load_image).grid(
-            row=0, column=0, sticky="ew", pady=2)
-        ttk.Button(file_frame, text="Process Image", command=self._process_image).grid(
-            row=1, column=0, sticky="ew", pady=2)
-        ttk.Button(file_frame, text="Generate DAT File", command=self._generate_dat).grid(
-            row=2, column=0, sticky="ew", pady=2)
+            row=0, column=0, columnspan=4, sticky="ew", pady=2)
 
-        file_frame.columnconfigure(0, weight=1)
+        # Quick rotation buttons (90/180 degrees)
+        ttk.Label(file_frame, text="Rotate:").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Button(file_frame, text="↺90°", width=5, command=lambda: self._quick_rotate(-90)).grid(
+            row=1, column=1, sticky="ew", padx=1, pady=2)
+        ttk.Button(file_frame, text="180°", width=5, command=lambda: self._quick_rotate(180)).grid(
+            row=1, column=2, sticky="ew", padx=1, pady=2)
+        ttk.Button(file_frame, text="↻90°", width=5, command=lambda: self._quick_rotate(90)).grid(
+            row=1, column=3, sticky="ew", padx=1, pady=2)
+
+        ttk.Button(file_frame, text="Process Image", command=self._process_image).grid(
+            row=2, column=0, columnspan=4, sticky="ew", pady=2)
+        ttk.Button(file_frame, text="Generate DAT File", command=self._generate_dat).grid(
+            row=3, column=0, columnspan=4, sticky="ew", pady=2)
+
+        file_frame.columnconfigure(1, weight=1)
+        file_frame.columnconfigure(2, weight=1)
+        file_frame.columnconfigure(3, weight=1)
 
         # Confidence display
-        confidence_frame = ttk.LabelFrame(right_panel, text="Detection Confidence", padding="10")
-        confidence_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        confidence_frame = ttk.LabelFrame(right_panel, text="Detection Confidence", padding="5")
+        confidence_frame.grid(row=1, column=0, sticky="ew", pady=(0, 5))
 
         ttk.Label(confidence_frame, text="Grid Detection:").grid(row=0, column=0, sticky="w")
         self.grid_confidence_var = tk.StringVar(value="--")
@@ -143,8 +172,8 @@ class PIC2GRAPHGUI:
         confidence_frame.columnconfigure(1, weight=1)
 
         # Measurements display
-        measurements_frame = ttk.LabelFrame(right_panel, text="Measurements", padding="10")
-        measurements_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        measurements_frame = ttk.LabelFrame(right_panel, text="Measurements", padding="5")
+        measurements_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
 
         self.measurement_vars = {}
         measurements = [
@@ -165,8 +194,8 @@ class PIC2GRAPHGUI:
         measurements_frame.columnconfigure(1, weight=1)
 
         # Manual adjustment controls
-        adjust_frame = ttk.LabelFrame(right_panel, text="Manual Contour Editing", padding="10")
-        adjust_frame.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        adjust_frame = ttk.LabelFrame(right_panel, text="Manual Contour Editing", padding="5")
+        adjust_frame.grid(row=3, column=0, sticky="ew", pady=(0, 5))
 
         self.edit_mode_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(adjust_frame, text="Enable Editing Mode",
@@ -192,12 +221,46 @@ class PIC2GRAPHGUI:
         ttk.Button(adjust_frame, text="Apply Changes", command=self._apply_contour_changes).grid(
             row=7, column=0, columnspan=2, sticky="ew", pady=(5, 0))
 
-        # Detection parameters
-        params_frame = ttk.LabelFrame(right_panel, text="Detection Parameters", padding="10")
-        params_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        # Fine Rotation Control
+        rotation_frame = ttk.LabelFrame(right_panel, text="Fine Rotation", padding="5")
+        rotation_frame.grid(row=4, column=0, sticky="ew", pady=(0, 5))
 
-        ttk.Label(params_frame, text="Grid Size (mm):").grid(row=0, column=0, sticky="w")
-        self.grid_size_var = tk.StringVar(value="8")
+        ttk.Label(rotation_frame, text="Rotation Angle:").grid(row=0, column=0, sticky="w")
+        self.rotation_var = tk.DoubleVar(value=0.0)
+        self.rotation_slider = ttk.Scale(rotation_frame, from_=-45, to=45,
+                                          variable=self.rotation_var,
+                                          orient="horizontal",
+                                          command=self._on_rotation_change)
+        self.rotation_slider.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        self.rotation_label = ttk.Label(rotation_frame, text="0.0°", width=6)
+        self.rotation_label.grid(row=0, column=2, sticky="e", padx=(5, 0))
+
+        rotation_btn_frame = ttk.Frame(rotation_frame)
+        rotation_btn_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+
+        ttk.Button(rotation_btn_frame, text="-1°", width=4,
+                   command=lambda: self._adjust_rotation(-1)).pack(side="left", padx=2)
+        ttk.Button(rotation_btn_frame, text="-0.1°", width=5,
+                   command=lambda: self._adjust_rotation(-0.1)).pack(side="left", padx=2)
+        ttk.Button(rotation_btn_frame, text="Reset", width=5,
+                   command=lambda: self._adjust_rotation(0, reset=True)).pack(side="left", padx=2)
+        ttk.Button(rotation_btn_frame, text="+0.1°", width=5,
+                   command=lambda: self._adjust_rotation(0.1)).pack(side="left", padx=2)
+        ttk.Button(rotation_btn_frame, text="+1°", width=4,
+                   command=lambda: self._adjust_rotation(1)).pack(side="left", padx=2)
+
+        ttk.Button(rotation_frame, text="Auto-Align Horizontal",
+                   command=self._auto_align_horizontal).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+
+        rotation_frame.columnconfigure(1, weight=1)
+
+        # Detection parameters
+        params_frame = ttk.LabelFrame(right_panel, text="Detection Parameters", padding="5")
+        params_frame.grid(row=5, column=0, sticky="ew", pady=(0, 5))
+
+        ttk.Label(params_frame, text="Reference Size (mm):").grid(row=0, column=0, sticky="w")
+        self.grid_size_var = tk.StringVar(value="15")
         grid_entry = ttk.Entry(params_frame, textvariable=self.grid_size_var, width=10)
         grid_entry.grid(row=0, column=1, sticky="e")
 
@@ -205,7 +268,7 @@ class PIC2GRAPHGUI:
 
         # Status bar
         status_frame = ttk.Frame(right_panel)
-        status_frame.grid(row=5, column=0, sticky="ew")
+        status_frame.grid(row=6, column=0, sticky="ew")
 
         self.status_var = tk.StringVar(value="Ready. Load an image to begin.")
         status_label = ttk.Label(status_frame, textvariable=self.status_var,
@@ -256,8 +319,129 @@ class PIC2GRAPHGUI:
             self._update_measurements_display()
             self._reset_confidence_display()
 
+            # Reset rotation
+            self.rotation_var.set(0.0)
+            self.rotation_label.config(text="0.0°")
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load image: {str(e)}")
+
+    def _on_rotation_change(self, value):
+        """Handle rotation slider change."""
+        angle = float(value)
+        self.rotation_label.config(text=f"{angle:.1f}°")
+        self._apply_rotation_preview()
+
+    def _adjust_rotation(self, delta, reset=False):
+        """Adjust rotation by a fixed amount."""
+        if reset:
+            self.rotation_var.set(0.0)
+        else:
+            current = self.rotation_var.get()
+            new_val = max(-45, min(45, current + delta))
+            self.rotation_var.set(new_val)
+        self.rotation_label.config(text=f"{self.rotation_var.get():.1f}°")
+        self._apply_rotation_preview()
+
+    def _apply_rotation_preview(self):
+        """Apply rotation to the image and update preview."""
+        if self.state.original_image is None:
+            return
+
+        angle = self.rotation_var.get()
+
+        if abs(angle) < 0.01:
+            # No rotation needed
+            rotated = self.state.original_image.copy()
+        else:
+            # Rotate the image
+            rotated = self._rotate_image(self.state.original_image, angle)
+
+        self.state.processed_image = rotated
+        self._display_image(rotated)
+
+        # Clear previous detection results when rotation changes
+        self.state.left_contour = None
+        self.state.right_contour = None
+        self.state.measurements = None
+
+    def _rotate_image(self, image: np.ndarray, angle: float) -> np.ndarray:
+        """Rotate image by given angle in degrees."""
+        h, w = image.shape[:2]
+        center = (w // 2, h // 2)
+
+        # Get rotation matrix
+        rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # Calculate new image size to avoid cropping
+        cos = np.abs(rotation_matrix[0, 0])
+        sin = np.abs(rotation_matrix[0, 1])
+        new_w = int(h * sin + w * cos)
+        new_h = int(h * cos + w * sin)
+
+        # Adjust the rotation matrix for the new center
+        rotation_matrix[0, 2] += (new_w - w) / 2
+        rotation_matrix[1, 2] += (new_h - h) / 2
+
+        # Apply rotation with white border
+        rotated = cv2.warpAffine(
+            image, rotation_matrix, (new_w, new_h),
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255)
+        )
+
+        return rotated
+
+    def _quick_rotate(self, degrees: int):
+        """Quick rotation by 90 or 180 degrees."""
+        if self.state.original_image is None:
+            messagebox.showwarning("Warning", "Please load an image first.")
+            return
+
+        # Rotate the original image
+        if degrees == 90:
+            self.state.original_image = cv2.rotate(self.state.original_image, cv2.ROTATE_90_CLOCKWISE)
+        elif degrees == -90:
+            self.state.original_image = cv2.rotate(self.state.original_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif degrees == 180:
+            self.state.original_image = cv2.rotate(self.state.original_image, cv2.ROTATE_180)
+
+        # Reset fine rotation slider
+        self.rotation_var.set(0.0)
+        self.rotation_label.config(text="0.0°")
+
+        # Update display
+        self.state.processed_image = self.state.original_image.copy()
+        self._display_image(self.state.original_image)
+
+        # Clear detection results
+        self.state.left_contour = None
+        self.state.right_contour = None
+        self.state.measurements = None
+
+        self.status_var.set(f"Rotated {degrees}°")
+
+    def _auto_align_horizontal(self):
+        """Automatically detect and apply horizontal alignment."""
+        if self.state.original_image is None:
+            messagebox.showwarning("Warning", "Please load an image first.")
+            return
+
+        self.status_var.set("Auto-aligning...")
+        self.root.update()
+
+        # Use image aligner to detect rotation
+        _, rotation_angle = self.image_aligner.align_image(
+            self.state.original_image,
+            use_glasses_detection=True
+        )
+
+        # Apply detected rotation
+        self.rotation_var.set(rotation_angle)
+        self.rotation_label.config(text=f"{rotation_angle:.1f}°")
+        self._apply_rotation_preview()
+
+        self.status_var.set(f"Auto-aligned: {rotation_angle:.1f}° rotation applied")
 
     def _process_image(self):
         """Process the loaded image."""
@@ -269,45 +453,31 @@ class PIC2GRAPHGUI:
         self.root.update()
 
         try:
-            image = self.state.original_image.copy()
+            # Use the manually rotated image (from rotation slider)
+            rotation_angle = self.rotation_var.get()
+            if abs(rotation_angle) > 0.01:
+                image = self._rotate_image(self.state.original_image, rotation_angle)
+            else:
+                image = self.state.original_image.copy()
+
+            self.state.rotation_applied = rotation_angle
+            self.state.alignment_confidence = 100.0 if abs(rotation_angle) > 0.01 else 0.0
 
             # Update grid size
             try:
                 grid_size = float(self.grid_size_var.get())
                 self.grid_detector.grid_size_mm = grid_size
             except ValueError:
-                grid_size = 8.0
+                grid_size = 15.0
 
-            # Grid detection (first pass for alignment reference)
-            self.status_var.set("Detecting grid...")
+            # Grid/Reference detection on rotated image
+            self.status_var.set("Detecting reference...")
             self.root.update()
             pixels_per_mm, grid_conf = self.grid_detector.detect_grid(image)
             self.state.pixels_per_mm = pixels_per_mm
             self.state.grid_confidence = grid_conf
 
-            # Image alignment (rotation correction based on grid and glasses)
-            self.status_var.set("Aligning image...")
-            self.root.update()
-            aligned_image, rotation_angle = self.image_aligner.align_image(
-                image,
-                grid_lines_h=self.grid_detector.grid_lines_horizontal,
-                grid_lines_v=self.grid_detector.grid_lines_vertical,
-                use_glasses_detection=True
-            )
-            self.state.rotation_applied = rotation_angle
-            self.state.alignment_confidence = self.image_aligner.confidence * 100
-            self.state.aligned_image = aligned_image
-
-            # If significant rotation applied, re-detect grid on aligned image
-            if abs(rotation_angle) > 1.0:
-                pixels_per_mm_new, grid_conf_new = self.grid_detector.detect_grid(aligned_image)
-                if grid_conf_new > grid_conf:
-                    pixels_per_mm = pixels_per_mm_new
-                    grid_conf = grid_conf_new
-                    self.state.pixels_per_mm = pixels_per_mm
-                    self.state.grid_confidence = grid_conf
-
-            image = aligned_image
+            self.state.aligned_image = image
             self.state.processed_image = image
 
             # Contour detection on aligned image
@@ -397,6 +567,12 @@ class PIC2GRAPHGUI:
 
         display = self.state.processed_image.copy()
 
+        # Colors for labels
+        color_a = (0, 165, 255)      # Orange for A
+        color_b = (255, 0, 255)      # Magenta for B
+        color_bridge = (0, 255, 0)   # Green for Bridge
+        color_ref = (255, 255, 0)    # Cyan for Reference
+
         # Draw contours
         if self.state.left_contour is not None:
             cv2.drawContours(display, [self.state.left_contour], -1, (0, 0, 255), 2)
@@ -408,12 +584,217 @@ class PIC2GRAPHGUI:
             x, y, w, h = cv2.boundingRect(self.state.right_contour)
             cv2.rectangle(display, (x, y), (x+w, y+h), (255, 0, 0), 1)
 
+        # Use right contour for labeling (or left if right not available)
+        label_contour = self.state.right_contour if self.state.right_contour is not None else self.state.left_contour
+
+        # Draw labeled measurement lines on the contour (following optical measurement standards)
+        if label_contour is not None:
+            lx, ly, lw, lh = cv2.boundingRect(label_contour)
+
+            # Get measurement values - calculate if not available
+            if self.state.measurements is not None:
+                if self.state.measurements.right_lens:
+                    a_val = self.state.measurements.right_lens.a_mm
+                    b_val = self.state.measurements.right_lens.b_mm
+                elif self.state.measurements.left_lens:
+                    a_val = self.state.measurements.left_lens.a_mm
+                    b_val = self.state.measurements.left_lens.b_mm
+                else:
+                    a_val = b_val = 0
+            elif self.state.pixels_per_mm > 0:
+                # Calculate from bounding box if measurements not available
+                a_val = lw / self.state.pixels_per_mm
+                b_val = lh / self.state.pixels_per_mm
+            else:
+                a_val = b_val = 0
+
+            # Calculate geometric center of the lens
+            center_x = lx + lw // 2
+            center_y = ly + lh // 2
+
+            # Draw Datum Line (horizontal line through geometric center)
+            datum_color = (128, 128, 128)  # Gray
+            cv2.line(display, (lx - 30, center_y), (lx + lw + 30, center_y), datum_color, 1, cv2.LINE_AA)
+
+            # Draw A measurement line (horizontal width) - ABOVE the lens as per standard
+            a_y = ly - 20  # Above the bounding box
+            cv2.line(display, (lx, a_y), (lx + lw, a_y), color_a, 3)
+            # Draw end caps for A line
+            cv2.line(display, (lx, a_y - 10), (lx, a_y + 10), color_a, 3)
+            cv2.line(display, (lx + lw, a_y - 10), (lx + lw, a_y + 10), color_a, 3)
+            # Draw arrows pointing inward
+            cv2.line(display, (lx, a_y), (lx + 15, a_y - 6), color_a, 2)
+            cv2.line(display, (lx, a_y), (lx + 15, a_y + 6), color_a, 2)
+            cv2.line(display, (lx + lw, a_y), (lx + lw - 15, a_y - 6), color_a, 2)
+            cv2.line(display, (lx + lw, a_y), (lx + lw - 15, a_y + 6), color_a, 2)
+            # Draw A label with background - centered above the line
+            a_label = f"A = {a_val:.1f}mm"
+            (tw, th), _ = cv2.getTextSize(a_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            label_x = lx + lw // 2 - tw // 2
+            label_y = a_y - 15
+            cv2.rectangle(display, (label_x - 5, label_y - th - 5), (label_x + tw + 5, label_y + 5), (0, 0, 0), -1)
+            cv2.putText(display, a_label, (label_x, label_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_a, 2)
+
+            # Draw B measurement line (vertical height) - on RIGHT side as per standard
+            b_x = lx + lw + 20  # Right of the bounding box
+            cv2.line(display, (b_x, ly), (b_x, ly + lh), color_b, 3)
+            # Draw end caps for B line
+            cv2.line(display, (b_x - 10, ly), (b_x + 10, ly), color_b, 3)
+            cv2.line(display, (b_x - 10, ly + lh), (b_x + 10, ly + lh), color_b, 3)
+            # Draw arrows pointing inward
+            cv2.line(display, (b_x, ly), (b_x - 6, ly + 15), color_b, 2)
+            cv2.line(display, (b_x, ly), (b_x + 6, ly + 15), color_b, 2)
+            cv2.line(display, (b_x, ly + lh), (b_x - 6, ly + lh - 15), color_b, 2)
+            cv2.line(display, (b_x, ly + lh), (b_x + 6, ly + lh - 15), color_b, 2)
+            # Draw B label with background - to the right of the line
+            b_label = f"B = {b_val:.1f}mm"
+            (tw, th), _ = cv2.getTextSize(b_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            label_x = b_x + 15
+            label_y = ly + lh // 2 + th // 2
+            cv2.rectangle(display, (label_x - 5, label_y - th - 5), (label_x + tw + 5, label_y + 5), (0, 0, 0), -1)
+            cv2.putText(display, b_label, (label_x, label_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_b, 2)
+
+            # Draw geometric center marker (small cross)
+            cv2.line(display, (center_x - 8, center_y), (center_x + 8, center_y), (0, 0, 0), 2)
+            cv2.line(display, (center_x, center_y - 8), (center_x, center_y + 8), (0, 0, 0), 2)
+
+        # Draw DBL line with label
+        if self.state.left_contour is not None and self.state.right_contour is not None:
+            # Get precise bridge points
+            left_points = self.state.left_contour.reshape(-1, 2)
+            right_points = self.state.right_contour.reshape(-1, 2)
+
+            # Ensure left is actually on the left
+            left_center_x = np.mean(left_points[:, 0])
+            right_center_x = np.mean(right_points[:, 0])
+
+            if left_center_x > right_center_x:
+                left_points, right_points = right_points, left_points
+
+            # Calculate bridge level (y-coordinate)
+            left_center_y = np.mean(left_points[:, 1])
+            right_center_y = np.mean(right_points[:, 1])
+            bridge_y = int((left_center_y + right_center_y) / 2)
+
+            # Find points near bridge level
+            left_y_range = left_points[:, 1].max() - left_points[:, 1].min()
+            right_y_range = right_points[:, 1].max() - right_points[:, 1].min()
+            y_tolerance = min(left_y_range, right_y_range) * 0.3
+
+            left_bridge_mask = np.abs(left_points[:, 1] - bridge_y) < y_tolerance
+            right_bridge_mask = np.abs(right_points[:, 1] - bridge_y) < y_tolerance
+
+            left_bridge_points = left_points[left_bridge_mask]
+            right_bridge_points = right_points[right_bridge_mask]
+
+            if len(left_bridge_points) > 0 and len(right_bridge_points) > 0:
+                # Find innermost points
+                left_inner = int(left_bridge_points[:, 0].max())
+                right_inner = int(right_bridge_points[:, 0].min())
+            else:
+                # Fallback to bounding box
+                left_x, _, left_w, _ = cv2.boundingRect(self.state.left_contour)
+                right_x, _, _, _ = cv2.boundingRect(self.state.right_contour)
+                left_inner = left_x + left_w
+                right_inner = right_x
+
+            # Calculate bridge value
+            if self.state.measurements is not None:
+                bridge_val = self.state.measurements.dbl_mm
+            elif self.state.pixels_per_mm > 0:
+                bridge_val = abs(right_inner - left_inner) / self.state.pixels_per_mm
+            else:
+                bridge_val = 0
+
+            # Draw bridge line at precise positions
+            cv2.line(display, (left_inner, bridge_y), (right_inner, bridge_y), color_bridge, 3)
+            # Draw end caps for bridge line
+            cv2.line(display, (left_inner, bridge_y - 10), (left_inner, bridge_y + 10), color_bridge, 3)
+            cv2.line(display, (right_inner, bridge_y - 10), (right_inner, bridge_y + 10), color_bridge, 3)
+            # Draw arrows
+            cv2.line(display, (left_inner, bridge_y), (left_inner + 15, bridge_y - 8), color_bridge, 2)
+            cv2.line(display, (left_inner, bridge_y), (left_inner + 15, bridge_y + 8), color_bridge, 2)
+            cv2.line(display, (right_inner, bridge_y), (right_inner - 15, bridge_y - 8), color_bridge, 2)
+            cv2.line(display, (right_inner, bridge_y), (right_inner - 15, bridge_y + 8), color_bridge, 2)
+            # Draw DBL/Bridge label with background
+            bridge_center_x = (left_inner + right_inner) // 2
+            bridge_label = f"DBL = {bridge_val:.1f}mm"
+            (tw, th), _ = cv2.getTextSize(bridge_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            label_x = bridge_center_x - tw // 2
+            label_y = bridge_y - 15
+            cv2.rectangle(display, (label_x - 5, label_y - th - 5), (label_x + tw + 5, label_y + 5), (0, 0, 0), -1)
+            cv2.putText(display, bridge_label, (label_x, label_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bridge, 2)
+
+            # Draw datum line through both lens centers
+            if self.state.left_contour is not None and self.state.right_contour is not None:
+                left_bbox = cv2.boundingRect(self.state.left_contour)
+                right_bbox = cv2.boundingRect(self.state.right_contour)
+                left_center_x_bbox = left_bbox[0] + left_bbox[2] // 2
+                right_center_x_bbox = right_bbox[0] + right_bbox[2] // 2
+                datum_color = (128, 128, 128)  # Gray
+                # Extended datum line across both lenses
+                cv2.line(display, (left_bbox[0] - 50, bridge_y), (right_bbox[0] + right_bbox[2] + 50, bridge_y),
+                        datum_color, 1, cv2.LINE_AA)
+                # Draw center markers for both lenses
+                left_center_y = left_bbox[1] + left_bbox[3] // 2
+                right_center_y = right_bbox[1] + right_bbox[3] // 2
+                cv2.circle(display, (left_center_x_bbox, left_center_y), 5, (0, 0, 0), 2)
+                cv2.circle(display, (right_center_x_bbox, right_center_y), 5, (0, 0, 0), 2)
+
+        # Draw reference grid square
+        self._draw_reference_square(display, color_ref)
+
         self.state.display_image = display
         self._display_image(display)
 
         # Draw control points if in edit mode
         if self.edit_mode:
             self._draw_control_points()
+
+    def _draw_reference_square(self, display: np.ndarray, color: Tuple[int, int, int]) -> None:
+        """Draw the detected reference square (with 'A' inside) on the display."""
+        if self.state.pixels_per_mm <= 0:
+            return
+
+        # Get grid size from the entry
+        try:
+            grid_size_mm = float(self.grid_size_var.get())
+        except ValueError:
+            grid_size_mm = 15.0
+
+        # Use the reference square detected by grid_detector
+        if self.grid_detector.reference_square is not None:
+            ref_x, ref_y, ref_w, ref_h = self.grid_detector.reference_square
+
+            # Draw the reference square highlighting the detected square
+            cv2.rectangle(display, (ref_x, ref_y), (ref_x + ref_w, ref_y + ref_h), color, 3)
+
+            # Draw corner markers to highlight the corners
+            marker_len = 15
+            # Top-left corner
+            cv2.line(display, (ref_x - marker_len, ref_y), (ref_x + marker_len, ref_y), color, 3)
+            cv2.line(display, (ref_x, ref_y - marker_len), (ref_x, ref_y + marker_len), color, 3)
+            # Top-right corner
+            cv2.line(display, (ref_x + ref_w - marker_len, ref_y), (ref_x + ref_w + marker_len, ref_y), color, 3)
+            cv2.line(display, (ref_x + ref_w, ref_y - marker_len), (ref_x + ref_w, ref_y + marker_len), color, 3)
+            # Bottom-left corner
+            cv2.line(display, (ref_x - marker_len, ref_y + ref_h), (ref_x + marker_len, ref_y + ref_h), color, 3)
+            cv2.line(display, (ref_x, ref_y + ref_h - marker_len), (ref_x, ref_y + ref_h + marker_len), color, 3)
+            # Bottom-right corner
+            cv2.line(display, (ref_x + ref_w - marker_len, ref_y + ref_h), (ref_x + ref_w + marker_len, ref_y + ref_h), color, 3)
+            cv2.line(display, (ref_x + ref_w, ref_y + ref_h - marker_len), (ref_x + ref_w, ref_y + ref_h + marker_len), color, 3)
+
+            # Draw label with background
+            ref_label = f"Reference: {grid_size_mm}x{grid_size_mm}mm"
+            (tw, th), _ = cv2.getTextSize(ref_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            label_x = ref_x
+            label_y = ref_y + ref_h + 30
+            cv2.rectangle(display, (label_x - 5, label_y - th - 5), (label_x + tw + 5, label_y + 5), (0, 0, 0), -1)
+            cv2.putText(display, ref_label, (label_x, label_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
     def _draw_control_points(self):
         """Draw control points on the canvas."""

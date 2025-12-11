@@ -218,8 +218,100 @@ class ImageAligner:
     def _detect_glasses_orientation(self, image: np.ndarray) -> Tuple[float, float]:
         """
         Detect the orientation of the glasses frame itself.
-        Uses the overall elongated shape of the glasses to determine angle.
+        Uses the line connecting the two lens centers to determine angle.
         """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+
+        # Detect the dark frame material
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Clean up
+        kernel = np.ones((5, 5), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=3)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=2)
+
+        # Find contours with hierarchy to detect lens openings (holes in frame)
+        contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours or hierarchy is None:
+            return self._detect_glasses_orientation_fallback(image)
+
+        hierarchy = hierarchy[0]
+
+        # Find lens candidates (holes in the frame)
+        lens_candidates = []
+        min_area = h * w * 0.01  # At least 1% of image
+        max_area = h * w * 0.25  # At most 25% of image
+
+        for i, (contour, hier) in enumerate(zip(contours, hierarchy)):
+            parent_idx = hier[3]
+
+            # Look for contours that are holes (have a parent)
+            if parent_idx == -1:
+                continue
+
+            area = cv2.contourArea(contour)
+            if area < min_area or area > max_area:
+                continue
+
+            if len(contour) < 5:
+                continue
+
+            # Get bounding rect
+            x, y, bw, bh = cv2.boundingRect(contour)
+            aspect = max(bw, bh) / (min(bw, bh) + 1e-6)
+
+            # Lens openings should be roughly oval
+            if aspect > 2.5:
+                continue
+
+            # Calculate center
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+            else:
+                cx, cy = x + bw / 2, y + bh / 2
+
+            lens_candidates.append({
+                'contour': contour,
+                'center': (cx, cy),
+                'bbox': (x, y, bw, bh),
+                'area': area
+            })
+
+        # If we found two lens candidates, use them to determine orientation
+        if len(lens_candidates) >= 2:
+            # Sort by area and take the two largest
+            lens_candidates.sort(key=lambda x: x['area'], reverse=True)
+            lens1, lens2 = lens_candidates[0], lens_candidates[1]
+
+            cx1, cy1 = lens1['center']
+            cx2, cy2 = lens2['center']
+
+            # Calculate angle of the line connecting the two lens centers
+            dx = cx2 - cx1
+            dy = cy2 - cy1
+
+            if abs(dx) > 10:  # Ensure there's horizontal separation
+                angle = np.arctan2(dy, dx) * 180 / np.pi
+
+                # Normalize to small angle (we want horizontal)
+                while angle > 45:
+                    angle -= 90
+                while angle < -45:
+                    angle += 90
+
+                # High confidence if we found two clear lenses
+                confidence = 0.9
+
+                return -angle, confidence
+
+        return self._detect_glasses_orientation_fallback(image)
+
+    def _detect_glasses_orientation_fallback(self, image: np.ndarray) -> Tuple[float, float]:
+        """Fallback method using overall frame shape."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
 
@@ -251,7 +343,6 @@ class ImageAligner:
             return 0.0, 0.0
 
         # Analyze the combined bounding region of significant contours
-        # or use minimum area rectangle
         angles = []
         weights = []
 
