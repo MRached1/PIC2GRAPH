@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xxd:*)",
+      "Bash(cat:*)",
+      "Bash(python draw_shape.py:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
